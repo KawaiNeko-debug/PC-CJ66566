@@ -1,0 +1,19 @@
+name: 抽奖测试组
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      ACCOUNTS_TEST:
+        required: true
+      BRAND_TOKEN:
+        required: true
+
+jobs:
+  run:
+    uses: ./.github/workflows/lottery.yml
+    with:
+      group_name: test
+    secrets:
+      ACCOUNTS: ${{ secrets.ACCOUNTS_TEST }}
+      BRAND_TOKEN: ${{ secrets.BRAND_TOKEN }}

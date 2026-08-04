@@ -1,0 +1,19 @@
+name: 抽奖账号组3
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      ACCOUNTS_BATCH3:
+        required: true
+      BRAND_TOKEN:
+        required: true
+
+jobs:
+  run:
+    uses: ./.github/workflows/lottery.yml
+    with:
+      group_name: group3
+    secrets:
+      ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH3 }}
+      BRAND_TOKEN: ${{ secrets.BRAND_TOKEN }}
