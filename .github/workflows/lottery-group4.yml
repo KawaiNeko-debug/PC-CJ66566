@@ -8,6 +8,14 @@ on:
         required: true
       BRAND_TOKEN:
         required: true
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
+      TG_BOT_TOKEN:
+        required: false
+      TG_CHAT_ID:
+        required: false
 
 jobs:
   run:
@@ -17,3 +25,5 @@ jobs:
     secrets:
       ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH4 }}
       BRAND_TOKEN: ${{ secrets.BRAND_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TG_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.TG_CHAT_ID }}

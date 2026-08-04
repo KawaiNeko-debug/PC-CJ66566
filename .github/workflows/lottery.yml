@@ -12,6 +12,10 @@ on:
         required: true
       BRAND_TOKEN:
         required: true
+      TELEGRAM_BOT_TOKEN:
+        required: false
+      TELEGRAM_CHAT_ID:
+        required: false
 
 permissions:
   contents: read
@@ -98,6 +102,11 @@ jobs:
       EXCHANGE_DELAY_MAX: "4"
       DRAW_DELAY_MIN: "5"
       DRAW_DELAY_MAX: "8"
+      POST_DRAW_SETTLE_DELAY_MIN: "2"
+      POST_DRAW_SETTLE_DELAY_MAX: "4"
+      EXCHANGE_ARRIVAL_RETRIES: "3"
+      EXCHANGE_ARRIVAL_DELAY_MIN: "2"
+      EXCHANGE_ARRIVAL_DELAY_MAX: "4"
     steps:
       - uses: actions/checkout@v4
 
@@ -182,7 +191,7 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - run: python -m pip install openpyxl==3.1.5
+      - run: python -m pip install openpyxl==3.1.5 requests==2.32.4
 
       - name: 下载账号结果
         uses: actions/download-artifact@v4
@@ -191,10 +200,14 @@ jobs:
           path: artifacts
 
       - name: 生成 JSON 和 XLSX 汇总
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: >-
           python report.py artifacts
           --merged-json merged/result.json
           --xlsx merged/lottery-summary.xlsx
+          --telegram
 
       - name: 上传汇总
         uses: actions/upload-artifact@v4

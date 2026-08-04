@@ -12,6 +12,8 @@ jobs:
     secrets:
       ACCOUNTS_BATCH1: ${{ secrets.ACCOUNTS_BATCH1 }}
       BRAND_TOKEN: ${{ secrets.BRAND_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TG_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.TG_CHAT_ID }}
 
   group2:
     needs: group1
@@ -20,6 +22,8 @@ jobs:
     secrets:
       ACCOUNTS_BATCH2: ${{ secrets.ACCOUNTS_BATCH2 }}
       BRAND_TOKEN: ${{ secrets.BRAND_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TG_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.TG_CHAT_ID }}
 
   group3:
     needs: group2
@@ -28,6 +32,8 @@ jobs:
     secrets:
       ACCOUNTS_BATCH3: ${{ secrets.ACCOUNTS_BATCH3 }}
       BRAND_TOKEN: ${{ secrets.BRAND_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TG_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.TG_CHAT_ID }}
 
   group4:
     needs: group3
@@ -36,6 +42,8 @@ jobs:
     secrets:
       ACCOUNTS_BATCH4: ${{ secrets.ACCOUNTS_BATCH4 }}
       BRAND_TOKEN: ${{ secrets.BRAND_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TG_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.TG_CHAT_ID }}
 
   group5:
     needs: group4
@@ -44,3 +52,5 @@ jobs:
     secrets:
       ACCOUNTS_BATCH5: ${{ secrets.ACCOUNTS_BATCH5 }}
       BRAND_TOKEN: ${{ secrets.BRAND_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TG_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.TG_CHAT_ID }}

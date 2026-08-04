@@ -44,6 +44,7 @@ VOUCHER_DETAIL_PATH = "/api/integral/member/day/activity/ns/getVoucherLotteryDet
 EXCHANGE_CHANCE_PATH = "/api/integral/member/day/activity/exchangeLotteryChance"
 LUCKY_COUNT_PATH = "/api/cgi/operationService/front/lottery/getLuckyKeyCount"
 TURN_PATH = "/api/cgi/operationService/front/lottery/turn"
+BLIND_BOX_PATH = "/api/integral/member/day/activity/selectBlindBoxGiftPopup"
 
 DEFAULT_ACTIVITY_ACCESS_ID = "fc7534debba644c5a0d26af52651d16f"
 DEFAULT_ACTIVITY_CODE = "LAMD"
@@ -68,6 +69,7 @@ AGREEMENT_SELECTORS = ('label .el-checkbox__inner', 'input[type="checkbox"]')
 SUBMIT_SELECTORS = ('#submitLogin', 'button[type="submit"]', 'button.el-button--primary')
 PASSWORD_ERROR_RE = re.compile(r"账号或密码不正确|用户名或密码错误|密码错误|登录失败")
 PENDING_HINT_RE = re.compile(r"活动还未开始|活动未开始|不在活动时间|活动已结束")
+INSUFFICIENT_POINTS_RE = re.compile(r"金豆不足|可用金豆不足|积分不足|余额不足")
 
 
 class LotteryError(RuntimeError):
@@ -98,6 +100,24 @@ class PrizeRecord:
     expiry_date: str = field(
         default_factory=lambda: (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
     )
+
+
+@dataclass
+class CouponRecord:
+    name: str
+    amount: str = ""
+    business_line: str = ""
+    coupon_type: int = 0
+
+
+@dataclass
+class LotteryCycleResult:
+    prizes: list[PrizeRecord]
+    remaining_chances: int
+    exchange_attempted: int
+    exchange_succeeded: int
+    exchange_message: str = ""
+    draw_message: str = ""
 
 
 def log(message: str) -> None:
@@ -230,13 +250,141 @@ def parse_turn_prizes(payload: Any, draw_index: int) -> list[PrizeRecord]:
     return records
 
 
+def parse_blind_box_coupons(payload: Any) -> list[CouponRecord]:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    rows = data.get("giftConfigList") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return []
+    coupons: list[CouponRecord] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("couponName") or row.get("giftName") or "").strip()
+        if not name:
+            continue
+        business_line = str(row.get("businessLine") or "").strip()
+        key = (name, business_line)
+        if key in seen:
+            continue
+        seen.add(key)
+        coupons.append(
+            CouponRecord(
+                name=name,
+                amount=str(row.get("couponAmount") or "").strip(),
+                business_line=business_line,
+                coupon_type=safe_int(row.get("couponType"), 0),
+            )
+        )
+    return coupons
+
+
+def is_insufficient_points(message: str) -> bool:
+    return bool(INSUFFICIENT_POINTS_RE.search(str(message or "")))
+
+
 def derive_status(exchange_message: str, draw_message: str, remaining: int) -> tuple[str, bool]:
     messages = [item for item in (exchange_message, draw_message) if item]
     if any(PENDING_HINT_RE.search(item) for item in messages):
         return "pending", False
-    if messages or remaining > 0:
+    blocking_exchange_message = exchange_message and not is_insufficient_points(exchange_message)
+    if blocking_exchange_message or draw_message or remaining > 0:
         return "partial", False
     return "completed", True
+
+
+def run_draw_exchange_cycle(
+    client: "CampaignClient", initial_count: int, initial_detail: dict[str, int]
+) -> LotteryCycleResult:
+    prizes: list[PrizeRecord] = []
+    count = max(0, initial_count)
+    draw_index = 0
+    exchange_attempted = 0
+    exchange_succeeded = 0
+    exchange_message = ""
+    draw_message = ""
+    drew_since_exchange = False
+    exchange_cap = min(
+        initial_detail["remaining"], max(0, env_int("LOTTERY_EXCHANGE_SAFETY_CAP", 3))
+    )
+    draw_cap = max(1, env_int("LOTTERY_DRAW_SAFETY_CAP", 50))
+
+    while True:
+        while count > 0:
+            if draw_index >= draw_cap:
+                draw_message = f"触发安全上限 {draw_cap}，仍剩余 {count} 次"
+                return LotteryCycleResult(
+                    prizes,
+                    count,
+                    exchange_attempted,
+                    exchange_succeeded,
+                    exchange_message,
+                    draw_message,
+                )
+            draw_index += 1
+            succeeded, rows, message = client.draw_once(draw_index)
+            if not succeeded:
+                draw_message = message
+                return LotteryCycleResult(
+                    prizes,
+                    count,
+                    exchange_attempted,
+                    exchange_succeeded,
+                    exchange_message,
+                    draw_message,
+                )
+            prizes.extend(rows)
+            drew_since_exchange = True
+            count = client.lucky_count()
+
+        if exchange_succeeded >= exchange_cap:
+            break
+
+        if drew_since_exchange:
+            random_delay(
+                env_float("POST_DRAW_SETTLE_DELAY_MIN", 2.0),
+                env_float("POST_DRAW_SETTLE_DELAY_MAX", 4.0),
+                "等待抽奖奖励结算",
+            )
+            drew_since_exchange = False
+
+        detail = client.exchange_detail()
+        if detail["remaining"] <= 0:
+            break
+
+        exchange_attempted += 1
+        succeeded, message = client.exchange_once(exchange_attempted)
+        if not succeeded:
+            exchange_message = message
+            if is_insufficient_points(message):
+                log("当前金豆不足，已抽完可用次数，不再强制兑换")
+            break
+
+        exchange_succeeded += 1
+        exchange_message = ""
+        arrival_retries = max(0, env_int("EXCHANGE_ARRIVAL_RETRIES", 3))
+        for retry in range(arrival_retries + 1):
+            count = client.lucky_count()
+            if count > 0:
+                break
+            if retry < arrival_retries:
+                random_delay(
+                    env_float("EXCHANGE_ARRIVAL_DELAY_MIN", 2.0),
+                    env_float("EXCHANGE_ARRIVAL_DELAY_MAX", 4.0),
+                    f"等待兑换次数到账 {retry + 1}/{arrival_retries}",
+                )
+        if count <= 0:
+            draw_message = "兑换成功但抽奖次数未到账"
+            break
+
+    return LotteryCycleResult(
+        prizes,
+        count,
+        exchange_attempted,
+        exchange_succeeded,
+        exchange_message,
+        draw_message,
+    )
 
 
 def runtime_timeouts() -> dict[str, int]:
@@ -628,8 +776,12 @@ class CampaignClient:
     def request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         result = self.page.evaluate(
             """async ({method, path, payload, secretKey}) => {
-                const headers = {accept: 'application/json, text/plain, */*', secretkey: secretKey};
-                const options = {method, credentials: 'include', headers};
+                const headers = {
+                    accept: 'application/json, text/plain, */*',
+                    secretkey: secretKey,
+                    'cache-control': 'no-cache',
+                };
+                const options = {method, credentials: 'include', headers, cache: 'no-store'};
                 if (method !== 'GET') {
                     headers['content-type'] = 'application/json';
                     options.body = JSON.stringify(payload || {});
@@ -676,63 +828,44 @@ class CampaignClient:
         )
         return detail
 
-    def exchange_all_available(self, detail: dict[str, int]) -> tuple[int, str]:
-        exchanged = 0
-        message = ""
-        safety_cap = max(0, env_int("LOTTERY_EXCHANGE_SAFETY_CAP", 3))
-        attempts = min(detail["remaining"], safety_cap)
-        for attempt in range(1, attempts + 1):
-            delay = random.uniform(
-                float(os.getenv("EXCHANGE_DELAY_MIN", "2")),
-                float(os.getenv("EXCHANGE_DELAY_MAX", "4")),
-            )
-            time.sleep(max(0, delay))
-            payload = self.request(
-                "POST", EXCHANGE_CHANCE_PATH, {"activityAccessId": self.activity_access_id}
-            )
-            if not api_succeeded(payload):
-                message = response_message(payload)
-                log(f"第 {attempt} 次兑换未完成: {message}")
-                break
-            exchanged += 1
-            log(f"第 {attempt} 次兑换成功")
-        return exchanged, message
+    def exchange_once(self, attempt: int) -> tuple[bool, str]:
+        random_delay(
+            env_float("EXCHANGE_DELAY_MIN", 2.0),
+            env_float("EXCHANGE_DELAY_MAX", 4.0),
+            f"第 {attempt} 次兑换前缓冲",
+        )
+        payload = self.request(
+            "POST", EXCHANGE_CHANCE_PATH, {"activityAccessId": self.activity_access_id}
+        )
+        if not api_succeeded(payload):
+            message = response_message(payload)
+            log(f"第 {attempt} 次兑换未完成: {message}")
+            return False, message
+        log(f"第 {attempt} 次兑换成功")
+        return True, ""
 
-    def draw_until_empty(self) -> tuple[list[PrizeRecord], int, str]:
-        prizes: list[PrizeRecord] = []
-        message = ""
-        safety_cap = max(1, env_int("LOTTERY_DRAW_SAFETY_CAP", 50))
-        draw_index = 0
-        while draw_index < safety_cap:
-            count = self.lucky_count()
-            if count <= 0:
-                return prizes, 0, message
-            draw_index += 1
-            delay = random.uniform(
-                float(os.getenv("DRAW_DELAY_MIN", "5")),
-                float(os.getenv("DRAW_DELAY_MAX", "8")),
-            )
-            time.sleep(max(0, delay))
-            payload = self.request(
-                "POST",
-                TURN_PATH,
-                {"clientType": "WEB", "activityCode": self.activity_code, "luckyKey": ""},
-            )
-            if not api_succeeded(payload):
-                message = response_message(payload)
-                log(f"第 {draw_index} 次抽奖未完成: {message}")
-                return prizes, count, message
-            parsed = parse_turn_prizes(payload, draw_index)
-            if parsed:
-                prizes.extend(parsed)
-                log(f"第 {draw_index} 次抽奖: {'、'.join(item.title for item in parsed)}")
-            else:
-                prizes.append(PrizeRecord(draw_index=draw_index, title="已中奖（奖品字段待活动开启后确认）"))
-                log(f"第 {draw_index} 次抽奖成功，但响应中未识别到奖品字段")
-        remaining = self.lucky_count()
-        if remaining > 0:
-            message = f"触发安全上限 {safety_cap}，仍剩余 {remaining} 次"
-        return prizes, remaining, message
+    def draw_once(self, draw_index: int) -> tuple[bool, list[PrizeRecord], str]:
+        random_delay(
+            env_float("DRAW_DELAY_MIN", 5.0),
+            env_float("DRAW_DELAY_MAX", 8.0),
+            f"第 {draw_index} 次抽奖前缓冲",
+        )
+        payload = self.request(
+            "POST",
+            TURN_PATH,
+            {"clientType": "WEB", "activityCode": self.activity_code, "luckyKey": ""},
+        )
+        if not api_succeeded(payload):
+            message = response_message(payload)
+            log(f"第 {draw_index} 次抽奖未完成: {message}")
+            return False, [], message
+        prizes = parse_turn_prizes(payload, draw_index)
+        if prizes:
+            log(f"第 {draw_index} 次抽奖: {'、'.join(item.title for item in prizes)}")
+        else:
+            prizes = [PrizeRecord(draw_index=draw_index, title="已中奖（奖品字段待活动开启后确认）")]
+            log(f"第 {draw_index} 次抽奖成功，但响应中未识别到奖品字段")
+        return True, prizes, ""
 
 
 def result_template(account: str, account_index: int) -> dict[str, Any]:
@@ -755,7 +888,12 @@ def result_template(account: str, account_index: int) -> dict[str, Any]:
         "chances_before_draw": 0,
         "draw_count": 0,
         "remaining_chances": 0,
+        "final_chance_check": 0,
+        "unfinished": False,
         "prizes": [],
+        "blind_box_coupons": [],
+        "blind_box_can_popup": False,
+        "blind_box_detail": "",
         "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "completed_at": "",
     }
@@ -798,12 +936,55 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
                     secret_holder["value"] = current
 
             page.on("request", capture_runtime_secret)
+            blind_box_holder: dict[str, Any] = {"payload": None}
+
+            def capture_blind_box(response) -> None:
+                if not response.url.split("?", 1)[0].endswith(BLIND_BOX_PATH):
+                    return
+                try:
+                    payload = response.json()
+                except Exception:
+                    return
+                if isinstance(payload, dict):
+                    blind_box_holder["payload"] = payload
+
+            page.on("response", capture_blind_box)
             client = CampaignClient(page, sso, secret_holder)
             user_info = client.open_and_verify()
             user_body = user_info.get("body") if isinstance(user_info, dict) else {}
             user_body = user_body if isinstance(user_body, dict) else {}
             result["customer_code"] = sso.customer_code
             result["initial_points"] = safe_int(user_body.get("canUseVoucher"), 0)
+
+            try:
+                blind_payload = blind_box_holder.get("payload")
+                if not isinstance(blind_payload, dict):
+                    blind_payload = client.request(
+                        "POST",
+                        BLIND_BOX_PATH,
+                        {"activityAccessId": client.activity_access_id},
+                    )
+                if not api_succeeded(blind_payload):
+                    raise LotteryError(
+                        f"盲盒礼包查询失败: {response_message(blind_payload)}"
+                    )
+                blind_data = blind_payload.get("data")
+                blind_data = blind_data if isinstance(blind_data, dict) else {}
+                coupons = parse_blind_box_coupons(blind_payload)
+                result["blind_box_coupons"] = [asdict(item) for item in coupons]
+                result["blind_box_can_popup"] = bool(blind_data.get("canPopup"))
+                result["blind_box_detail"] = (
+                    f"获取 {len(coupons)} 张优惠券"
+                    if coupons
+                    else "未返回优惠券列表（可能已领取）"
+                )
+                if coupons:
+                    log(f"盲盒礼包: {'、'.join(item.name for item in coupons)}")
+                else:
+                    log(result["blind_box_detail"])
+            except Exception as exc:
+                result["blind_box_detail"] = re.sub(r"[\r\n]+", " ", str(exc))[:500]
+                log(f"盲盒礼包记录失败，继续抽奖: {result['blind_box_detail']}")
 
             initial_count = client.lucky_count()
             detail = client.exchange_detail()
@@ -812,20 +993,30 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
                     "initial_chances": initial_count,
                     "exchange_used_before": detail["exchange_num"],
                     "exchange_max": detail["exchange_max"],
-                    "exchange_attempted": min(
-                        detail["remaining"], max(0, env_int("LOTTERY_EXCHANGE_SAFETY_CAP", 3))
-                    ),
+                    "exchange_attempted": 0,
                 }
             )
-            exchanged, exchange_message = client.exchange_all_available(detail)
-            result["exchange_succeeded"] = exchanged
+            cycle = run_draw_exchange_cycle(client, initial_count, detail)
+            final_remaining = client.lucky_count()
+            if final_remaining > 0:
+                final_message = f"最终校验仍剩余 {final_remaining} 次未抽完"
+                cycle.draw_message = "；".join(
+                    item for item in (cycle.draw_message, final_message) if item
+                )
+                log(final_message)
+            else:
+                log("最终校验通过: 剩余抽奖次数为 0")
 
-            before_draw = client.lucky_count()
-            result["chances_before_draw"] = before_draw
-            prizes, remaining, draw_message = client.draw_until_empty()
-            result["prizes"] = [asdict(item) for item in prizes]
-            result["draw_count"] = max((item.draw_index for item in prizes), default=0)
-            result["remaining_chances"] = remaining
+            result["exchange_attempted"] = cycle.exchange_attempted
+            result["exchange_succeeded"] = cycle.exchange_succeeded
+            result["chances_before_draw"] = initial_count + cycle.exchange_succeeded
+            result["prizes"] = [asdict(item) for item in cycle.prizes]
+            result["draw_count"] = max(
+                (item.draw_index for item in cycle.prizes), default=0
+            )
+            result["remaining_chances"] = final_remaining
+            result["final_chance_check"] = final_remaining
+            result["unfinished"] = final_remaining > 0
 
             final_info = client.request("GET", USER_INFO_PATH)
             final_body = final_info.get("body") if isinstance(final_info, dict) else {}
@@ -833,9 +1024,11 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
                 final_body.get("canUseVoucher") if isinstance(final_body, dict) else None,
                 result["initial_points"],
             )
-            messages = [item for item in (exchange_message, draw_message) if item]
+            messages = [
+                item for item in (cycle.exchange_message, cycle.draw_message) if item
+            ]
             result["status"], result["success"] = derive_status(
-                exchange_message, draw_message, remaining
+                cycle.exchange_message, cycle.draw_message, final_remaining
             )
             result["detail"] = "；".join(messages) or "所有可用抽奖次数已执行完毕"
         except Exception as exc:
