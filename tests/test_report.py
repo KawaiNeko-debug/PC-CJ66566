@@ -56,7 +56,14 @@ class ReportTests(unittest.TestCase):
                                 "exchange_succeeded": 3,
                                 "draw_count": 5,
                                 "remaining_chances": 0,
-                                "prizes": [{"draw_index": 1, "title": "5金豆"}],
+                                "prizes": [
+                                    {
+                                        "draw_index": 1,
+                                        "title": "5金豆",
+                                        "won_at": "2026-08-05 09:58:03",
+                                        "expiry_date": "2026-08-12",
+                                    }
+                                ],
                                 "blind_box_coupons": [
                                     {"name": "SMT 25元优惠券"},
                                     {"name": "FA商城30元优惠券"},
@@ -107,9 +114,16 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(merged_payload["total_draws"], 5)
             workbook = load_workbook(xlsx)
             self.assertEqual(workbook["抽奖汇总"].max_row, 3)
-            self.assertEqual(workbook["统计"]["B1"].value, 2)
+            self.assertEqual(workbook["统计"]["B2"].value, 2)
             self.assertEqual(workbook["抽奖汇总"]["L3"].value, 2)
             self.assertEqual(workbook["抽奖汇总"]["M3"].value, "是")
+            self.assertEqual(workbook["抽奖汇总"]["O1"].value, "抽奖1")
+            self.assertEqual(workbook["抽奖汇总"]["P1"].value, "过期时间")
+            self.assertEqual(workbook["抽奖汇总"]["O2"].value, "5金豆")
+            self.assertEqual(
+                workbook["抽奖汇总"]["P2"].value.strftime("%Y-%m-%d"), "2026-08-12"
+            )
+            self.assertEqual(workbook["抽奖汇总"].freeze_panes, "G2")
             self.assertIn("SMT 25元优惠券", workbook.sheetnames)
             coupon_sheet = workbook["SMT 25元优惠券"]
             self.assertEqual(coupon_sheet.max_column, 1)
@@ -124,6 +138,53 @@ class ReportTests(unittest.TestCase):
             self.assertIn("未抽完账号: 1", message)
             self.assertIn("ABC****0002: 最终校验剩余 2 次", message)
             self.assertIn("SMT 25元优惠券: 2 个账号", message)
+
+    def test_newer_retry_result_replaces_initial_slider_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            initial = root / "result-group1-1" / "result.json"
+            retry = root / "result-group1-1-retry1" / "result.json"
+            initial.parent.mkdir()
+            retry.parent.mkdir()
+            initial.write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "account_index": 1,
+                                "status": "failed",
+                                "success": False,
+                                "detail": "滑块验证未通过",
+                                "completed_at": "2026-08-05 10:00:00",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            retry.write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "account_index": 1,
+                                "status": "completed",
+                                "success": True,
+                                "detail": "所有可用抽奖次数已执行完毕",
+                                "completed_at": "2026-08-05 10:05:00",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            records = load_result_files(root)
+            self.assertEqual(len(records), 1)
+            self.assertTrue(records[0]["success"])
+            self.assertEqual(records[0]["status"], "completed")
 
 
 if __name__ == "__main__":

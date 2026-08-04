@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import re
@@ -494,55 +495,119 @@ def click_account_login_tab(page: Page, timeout_ms: int) -> bool:
         time.sleep(0.5)
 
 
-def solve_slider(page: Page, max_attempts: int = 5) -> None:
+def _slider_is_visible(slider, timeout_ms: int = 700) -> bool:
+    try:
+        return slider.is_visible(timeout=max(1, timeout_ms))
+    except Exception:
+        return False
+
+
+def _wait_for_slider_result(slider, timeout_ms: int) -> bool:
+    deadline = time.time() + max(0, timeout_ms) / 1000
+    while time.time() < deadline:
+        if not _slider_is_visible(slider):
+            return True
+        time.sleep(0.25)
+    return not _slider_is_visible(slider)
+
+
+def _drag_slider_with_mouse(page: Page, slider, wrapper) -> bool:
+    try:
+        slider.scroll_into_view_if_needed(timeout=5_000)
+        slider_box = slider.bounding_box(timeout=5_000)
+        wrapper_box = wrapper.bounding_box(timeout=5_000)
+    except Exception as exc:
+        log(f"读取滑块位置失败: {exc}")
+        return False
+    if not slider_box or not wrapper_box:
+        log("滑块位置尚未就绪")
+        return False
+
+    start_x = slider_box["x"] + slider_box["width"] / 2
+    start_y = slider_box["y"] + slider_box["height"] / 2
+    end_x = (
+        wrapper_box["x"]
+        + wrapper_box["width"]
+        - slider_box["width"] / 2
+        + random.uniform(10, 16)
+    )
+    end_y = start_y + random.uniform(-2.5, 2.5)
+    distance = end_x - start_x
+    if distance <= 20:
+        log(f"滑块轨道宽度异常: {distance:.1f}px")
+        return False
+
+    control1_x = start_x + distance * random.uniform(0.24, 0.34)
+    control2_x = start_x + distance * random.uniform(0.68, 0.82)
+    control1_y = start_y + random.uniform(-8, 8)
+    control2_y = end_y + random.uniform(-6, 6)
+    steps = random.randint(95, 135)
+
+    try:
+        page.mouse.move(start_x, start_y)
+        time.sleep(random.uniform(0.15, 0.35))
+        page.mouse.down()
+        for step in range(1, steps + 1):
+            progress = step / steps
+            inverse = 1 - progress
+            x = (
+                inverse**3 * start_x
+                + 3 * inverse**2 * progress * control1_x
+                + 3 * inverse * progress**2 * control2_x
+                + progress**3 * end_x
+            )
+            y = (
+                inverse**3 * start_y
+                + 3 * inverse**2 * progress * control1_y
+                + 3 * inverse * progress**2 * control2_y
+                + progress**3 * end_y
+            )
+            y += math.sin(progress * math.pi * 3) * random.uniform(0.0, 0.45)
+            page.mouse.move(x, y)
+            time.sleep(random.uniform(0.009, 0.021))
+        time.sleep(random.uniform(0.18, 0.32))
+        page.mouse.up()
+        return True
+    except Exception as exc:
+        try:
+            page.mouse.up()
+        except Exception:
+            pass
+        log(f"滑块拖动异常: {exc}")
+        return False
+
+
+def solve_slider(page: Page, max_attempts: int = 8) -> None:
     slider_selector = "#aliyunCaptcha-sliding-slider"
     wrapper_id = os.getenv("SLIDER_WRAPPER_ID", "aliyunCaptcha-sliding-wrapper")
     slider = page.locator(slider_selector)
-    try:
-        if not slider.is_visible(timeout=5000):
-            return
-    except Exception:
+    if not _slider_is_visible(slider, 5_000):
         return
 
-    script = """async ({wrapperId}) => {
-        const slider = document.getElementById('aliyunCaptcha-sliding-slider');
-        const wrapper = document.getElementById(wrapperId);
-        if (!slider || !wrapper) return false;
-        const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-        const start = slider.getBoundingClientRect();
-        const track = wrapper.getBoundingClientRect();
-        const x1 = start.left + start.width / 2;
-        const y1 = start.top + start.height / 2;
-        const x2 = track.right - start.width / 2 + 12;
-        const y2 = y1 + (Math.random() - 0.5) * 4;
-        const emit = (target, type, x, y) => target.dispatchEvent(new MouseEvent(type, {
-            bubbles: true, cancelable: true, view: window, clientX: x, clientY: y,
-            screenX: x, screenY: y, button: 0, buttons: type === 'mouseup' ? 0 : 1
-        }));
-        emit(slider, 'mousedown', x1, y1);
-        const steps = 70 + Math.floor(Math.random() * 25);
-        for (let i = 1; i <= steps; i += 1) {
-            const t = i / steps;
-            const eased = t < .5 ? 2*t*t : -1 + (4 - 2*t)*t;
-            const x = x1 + (x2 - x1) * eased + (Math.random() - .5) * 2;
-            const y = y1 + (y2 - y1) * eased + Math.sin(t * Math.PI) * 2;
-            emit(slider, 'mousemove', x, y);
-            emit(document, 'mousemove', x, y);
-            await sleep(10 + Math.random() * 12);
-        }
-        emit(slider, 'mouseup', x2, y2);
-        emit(document, 'mouseup', x2, y2);
-        return true;
-    }"""
+    wrapper = page.locator(f'[id="{wrapper_id}"]')
+    hosted = env_bool("GITHUB_ACTIONS", False)
+    result_timeout_ms = max(
+        3_000,
+        env_int("SLIDER_RESULT_TIMEOUT_MS", 10_000 if hosted else 8_000),
+    )
+    final_grace_seconds = max(0.0, env_float("SLIDER_FINAL_GRACE_SECONDS", 15.0))
+    retry_delay_min = env_float("SLIDER_RETRY_DELAY_MIN", 3.0)
+    retry_delay_max = env_float("SLIDER_RETRY_DELAY_MAX", 6.0)
 
     for attempt in range(1, max_attempts + 1):
         log(f"检测到滑块，执行第 {attempt}/{max_attempts} 次验证")
-        page.evaluate(script, {"wrapperId": wrapper_id})
-        time.sleep(3)
-        try:
-            if not slider.is_visible(timeout=1200):
-                return
-        except Exception:
+        if _drag_slider_with_mouse(page, slider, wrapper) and _wait_for_slider_result(
+            slider, result_timeout_ms
+        ):
+            log(f"滑块第 {attempt} 次验证通过")
+            return
+        if attempt < max_attempts:
+            random_delay(retry_delay_min, retry_delay_max, "等待滑块挑战刷新")
+
+    if final_grace_seconds > 0:
+        log(f"最后一次拖动已完成，额外等待 {final_grace_seconds:.0f}s 确认验证结果")
+        if _wait_for_slider_result(slider, int(final_grace_seconds * 1000)):
+            log("滑块在最终宽限期内验证通过")
             return
     raise LotteryError("滑块验证未通过")
 
@@ -645,7 +710,7 @@ def login_passport(page: Page, context: BrowserContext, account: str, password: 
             slider_visible = False
         if slider_visible:
             slider_attempts += 1
-            solve_slider(page, max_attempts=max(1, env_int("SLIDER_MAX_ATTEMPTS", 5)))
+            solve_slider(page, max_attempts=max(1, env_int("SLIDER_MAX_ATTEMPTS", 8)))
             next_log = time.time() + 15
             continue
 

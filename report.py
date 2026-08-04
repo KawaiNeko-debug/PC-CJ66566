@@ -18,24 +18,21 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 
-HEADERS = [
+BASE_HEADERS = [
     "序号",
-    "账号",
-    "状态",
+    "账户",
+    "组别",
+    "抽奖情况",
+    "详细原因",
+    "抽奖时间",
     "初始金豆",
     "结束金豆",
-    "原有抽奖次数",
-    "兑换前已用额度",
-    "兑换额度上限",
-    "本次兑换成功",
-    "累计可抽次数",
-    "实际抽奖次数",
-    "最终校验剩余次数",
-    "是否未抽完",
+    "原有次数",
+    "兑换次数",
+    "实际抽奖",
+    "剩余次数",
+    "未抽完",
     "盲盒优惠券",
-    "奖品",
-    "详情",
-    "完成时间",
 ]
 UTC_PLUS_8 = timezone(timedelta(hours=8))
 
@@ -162,26 +159,112 @@ def write_merged_json(path: Path, records: list[dict[str, Any]]) -> None:
     path.write_text(json.dumps(summary_payload(records), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def row_values(record: dict[str, Any]) -> list[Any]:
-    return [
+def report_account(record: dict[str, Any]) -> str:
+    return str(
+        record.get("customer_code")
+        or record.get("masked_username")
+        or record.get("username")
+        or ""
+    )
+
+
+def report_group(record: dict[str, Any]) -> str:
+    group = str(record.get("group_name") or "").strip()
+    index = int(record.get("account_index") or 0)
+    matched = re.fullmatch(r"group(\d+)", group, flags=re.IGNORECASE)
+    if matched:
+        return f"{matched.group(1)}组账号{index}"
+    if group.lower() == "test":
+        return f"测试账号{index}"
+    return f"{group + '账号' if group else '账号'}{index}"
+
+
+def report_status(record: dict[str, Any]) -> str:
+    return {
+        "completed": "抽奖成功",
+        "pending": "待处理",
+        "partial": "未抽完",
+        "failed": "执行失败",
+    }.get(str(record.get("status") or ""), str(record.get("status") or "未知"))
+
+
+def first_draw_time(record: dict[str, Any]) -> str:
+    prizes = record.get("prizes")
+    if isinstance(prizes, list):
+        ordered = sorted(
+            (item for item in prizes if isinstance(item, dict)),
+            key=lambda item: int(item.get("draw_index") or 0),
+        )
+        for prize in ordered:
+            won_at = str(prize.get("won_at") or "").strip()
+            if won_at:
+                return won_at.rsplit(" ", 1)[-1]
+    completed_at = str(record.get("completed_at") or "").strip()
+    return completed_at.rsplit(" ", 1)[-1] if completed_at else ""
+
+
+def draw_slots(records: list[dict[str, Any]]) -> int:
+    maximum = 0
+    for record in records:
+        maximum = max(maximum, int(record.get("draw_count") or 0))
+        prizes = record.get("prizes")
+        if not isinstance(prizes, list):
+            continue
+        for prize in prizes:
+            if isinstance(prize, dict):
+                maximum = max(maximum, int(prize.get("draw_index") or 0))
+    return max(3, maximum)
+
+
+def report_headers(slot_count: int) -> list[str]:
+    headers = list(BASE_HEADERS)
+    for draw_index in range(1, slot_count + 1):
+        headers.extend([f"抽奖{draw_index}", "过期时间"])
+    return headers
+
+
+def _excel_date(value: Any) -> Any:
+    text = str(value or "").strip()
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return text
+
+
+def row_values(record: dict[str, Any], slot_count: int) -> list[Any]:
+    values: list[Any] = [
         int(record.get("account_index") or 0),
-        str(record.get("masked_username") or record.get("username") or ""),
-        str(record.get("status") or ""),
+        report_account(record),
+        report_group(record),
+        report_status(record),
+        str(record.get("detail") or ""),
+        first_draw_time(record),
         int(record.get("initial_points") or 0),
         int(record.get("final_points") or 0),
         int(record.get("initial_chances") or 0),
-        int(record.get("exchange_used_before") or 0),
-        int(record.get("exchange_max") or 0),
         int(record.get("exchange_succeeded") or 0),
-        int(record.get("chances_before_draw") or 0),
         int(record.get("draw_count") or 0),
         final_remaining(record),
         "是" if is_unfinished(record) else "否",
         coupon_text(record),
-        prize_text(record),
-        str(record.get("detail") or ""),
-        str(record.get("completed_at") or ""),
     ]
+    prizes_by_draw: dict[int, list[dict[str, Any]]] = {}
+    for prize in record.get("prizes") or []:
+        if not isinstance(prize, dict):
+            continue
+        index = int(prize.get("draw_index") or 0)
+        if index > 0:
+            prizes_by_draw.setdefault(index, []).append(prize)
+    for draw_index in range(1, slot_count + 1):
+        prizes = prizes_by_draw.get(draw_index, [])
+        titles = [str(item.get("title") or "").strip() for item in prizes]
+        titles = [title for title in titles if title]
+        expiry = next(
+            (str(item.get("expiry_date") or "").strip() for item in prizes if item.get("expiry_date")),
+            "",
+        )
+        values.extend(["；".join(titles), _excel_date(expiry)])
+    return values
 
 
 def write_xlsx(path: Path, records: list[dict[str, Any]]) -> None:
@@ -189,21 +272,31 @@ def write_xlsx(path: Path, records: list[dict[str, Any]]) -> None:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "抽奖汇总"
-    sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = f"A1:{get_column_letter(len(HEADERS))}{max(1, len(records) + 1)}"
+    slot_count = draw_slots(records)
+    headers = report_headers(slot_count)
+    sheet.freeze_panes = "G2"
+    sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(1, len(records) + 1)}"
+    sheet.sheet_view.showGridLines = False
+    sheet.sheet_view.zoomScale = 90
 
-    header_fill = PatternFill("solid", fgColor="1F4E78")
-    header_font = Font(color="FFFFFF", bold=True)
-    thin = Side(style="thin", color="D9E2F3")
+    header_fill = PatternFill("solid", fgColor="D9E5F6")
+    header_font = Font(name="Microsoft YaHei", color="1F1F1F", bold=True, size=10)
+    body_font = Font(name="Microsoft YaHei", color="333333", size=10)
+    thin = Side(style="thin", color="D9D9D9")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     status_fills = {
-        "completed": PatternFill("solid", fgColor="C6EFCE"),
-        "pending": PatternFill("solid", fgColor="FFEB9C"),
+        "pending": PatternFill("solid", fgColor="FFF2CC"),
         "partial": PatternFill("solid", fgColor="FCE4D6"),
-        "failed": PatternFill("solid", fgColor="FFC7CE"),
+        "failed": PatternFill("solid", fgColor="F4CCCC"),
+    }
+    status_fonts = {
+        "completed": Font(name="Microsoft YaHei", color="00A933", size=10),
+        "pending": Font(name="Microsoft YaHei", color="9C6500", size=10),
+        "partial": Font(name="Microsoft YaHei", color="C65911", bold=True, size=10),
+        "failed": Font(name="Microsoft YaHei", color="C00000", bold=True, size=10),
     }
 
-    sheet.append(HEADERS)
+    sheet.append(headers)
     for cell in sheet[1]:
         cell.fill = header_fill
         cell.font = header_font
@@ -211,25 +304,42 @@ def write_xlsx(path: Path, records: list[dict[str, Any]]) -> None:
         cell.border = border
 
     for record in records:
-        sheet.append(row_values(record))
+        sheet.append(row_values(record, slot_count))
         row_number = sheet.max_row
         status = str(record.get("status") or "")
         for cell in sheet[row_number]:
             cell.border = border
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            cell.font = body_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        sheet.cell(row_number, 2).alignment = Alignment(horizontal="left", vertical="center")
+        sheet.cell(row_number, 5).alignment = Alignment(horizontal="left", vertical="center")
+        sheet.cell(row_number, 14).alignment = Alignment(horizontal="left", vertical="center")
+        if status in status_fonts:
+            sheet.cell(row_number, 4).font = status_fonts[status]
         if status in status_fills:
-            sheet.cell(row_number, 3).fill = status_fills[status]
+            sheet.cell(row_number, 4).fill = status_fills[status]
         if is_unfinished(record):
             sheet.cell(row_number, 12).fill = status_fills["failed"]
             sheet.cell(row_number, 13).fill = status_fills["failed"]
-            sheet.cell(row_number, 13).font = Font(color="9C0006", bold=True)
+            sheet.cell(row_number, 13).font = status_fonts["failed"]
+        for expiry_column in range(len(BASE_HEADERS) + 2, len(headers) + 1, 2):
+            expiry_cell = sheet.cell(row_number, expiry_column)
+            expiry_cell.font = Font(name="Microsoft YaHei", color="E53935", size=10)
+            if isinstance(expiry_cell.value, datetime) or hasattr(expiry_cell.value, "year"):
+                expiry_cell.number_format = "yyyy-mm-dd"
 
-    widths = [8, 18, 12, 12, 12, 14, 16, 16, 16, 16, 16, 20, 14, 48, 45, 48, 22]
+    widths = [7, 18, 15, 12, 32, 12, 11, 11, 11, 11, 11, 11, 10, 30]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
-    sheet.row_dimensions[1].height = 24
+    for index in range(len(BASE_HEADERS) + 1, len(headers) + 1, 2):
+        sheet.column_dimensions[get_column_letter(index)].width = 18
+        sheet.column_dimensions[get_column_letter(index + 1)].width = 14
+    sheet.row_dimensions[1].height = 25
+    for row_number in range(2, sheet.max_row + 1):
+        sheet.row_dimensions[row_number].height = 22
 
     stats = workbook.create_sheet("统计")
+    stats.sheet_view.showGridLines = False
     summary = summary_payload(records)
     stats_rows = [
         ("账号总数", summary["total_accounts"]),
@@ -244,18 +354,30 @@ def write_xlsx(path: Path, records: list[dict[str, Any]]) -> None:
         ("盲盒优惠券发放记录", summary["coupon_assignments"]),
         ("生成时间", summary["generated_at"]),
     ]
+    stats.append(["统计项", "数值"])
     for label, value in stats_rows:
         stats.append([label, value])
-    stats.column_dimensions["A"].width = 25
-    stats.column_dimensions["B"].width = 25
-    for row in stats.iter_rows():
-        row[0].font = Font(bold=True)
+    stats.freeze_panes = "A2"
+    stats.auto_filter.ref = f"A1:B{stats.max_row}"
+    stats.column_dimensions["A"].width = 26
+    stats.column_dimensions["B"].width = 24
+    for cell in stats[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+    stats.row_dimensions[1].height = 25
+    for row in stats.iter_rows(min_row=2):
+        row[0].font = Font(name="Microsoft YaHei", bold=True, color="333333", size=10)
+        row[1].font = body_font
         for cell in row:
             cell.border = border
+            cell.alignment = Alignment(vertical="center")
 
     used_titles = set(workbook.sheetnames)
     for coupon_name, customer_codes in coupon_assignments(records).items():
         coupon_sheet = workbook.create_sheet(safe_sheet_title(coupon_name, used_titles))
+        coupon_sheet.sheet_view.showGridLines = False
         coupon_sheet.append(["客编"])
         header = coupon_sheet[1][0]
         header.fill = header_fill
@@ -265,7 +387,8 @@ def write_xlsx(path: Path, records: list[dict[str, Any]]) -> None:
         for customer_code in customer_codes:
             coupon_sheet.append([customer_code])
             cell = coupon_sheet.cell(coupon_sheet.max_row, 1)
-            cell.alignment = Alignment(vertical="center")
+            cell.font = body_font
+            cell.alignment = Alignment(horizontal="left", vertical="center")
             cell.border = border
         coupon_sheet.freeze_panes = "A2"
         coupon_sheet.auto_filter.ref = f"A1:A{max(1, coupon_sheet.max_row)}"

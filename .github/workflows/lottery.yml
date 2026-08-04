@@ -80,6 +80,11 @@ jobs:
       LOGIN_FORM_LOAD_RETRIES: "3"
       LOGIN_TIMEOUT_SECONDS: "300"
       SLIDER_APPEAR_TIMEOUT_MS: "60000"
+      SLIDER_MAX_ATTEMPTS: "8"
+      SLIDER_RESULT_TIMEOUT_MS: "10000"
+      SLIDER_RETRY_DELAY_MIN: "3"
+      SLIDER_RETRY_DELAY_MAX: "6"
+      SLIDER_FINAL_GRACE_SECONDS: "15"
       HTTP_TIMEOUT_SECONDS: "90"
       EXCHANGE_DELAY_MIN: "2"
       EXCHANGE_DELAY_MAX: "4"
@@ -163,8 +168,143 @@ jobs:
           path: result.json
           retention-days: 14
 
-  report:
+  prepare_retry:
     needs: [prepare, lottery]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.retry.outputs.matrix }}
+      has_retry: ${{ steps.retry.outputs.has_retry }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载初次账号结果
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-${{ inputs.group_name }}-*
+          path: initial-results
+
+      - id: retry
+        name: 筛选滑块失败账号
+        run: python retry_plan.py initial-results
+
+  retry_lottery:
+    needs: [prepare, prepare_retry]
+    if: always() && needs.prepare_retry.outputs.has_retry == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.prepare_retry.outputs.matrix) }}
+    env:
+      ACCOUNTS: ${{ secrets.ACCOUNTS }}
+      ACCOUNT_INDEX: ${{ matrix.index }}
+      GROUP_NAME: ${{ inputs.group_name }}
+      BRAND_TOKEN: ${{ secrets.BRAND_TOKEN }}
+      HEADLESS: "true"
+      RESULT_JSON_PATH: result.json
+      ACTIVITY_ACCESS_ID: fc7534debba644c5a0d26af52651d16f
+      LOTTERY_ACTIVITY_CODE: LAMD
+      LOTTERY_EXCHANGE_SAFETY_CAP: "3"
+      LOTTERY_DRAW_SAFETY_CAP: "50"
+      BROWSER_LAUNCH_TIMEOUT_MS: "120000"
+      PAGE_NAVIGATION_TIMEOUT_MS: "180000"
+      PAGE_NETWORKIDLE_TIMEOUT_MS: "90000"
+      PAGE_COMPONENT_TIMEOUT_MS: "120000"
+      PAGE_LOAD_RETRIES: "3"
+      LOGIN_FORM_LOAD_RETRIES: "3"
+      LOGIN_TIMEOUT_SECONDS: "300"
+      SLIDER_APPEAR_TIMEOUT_MS: "60000"
+      SLIDER_MAX_ATTEMPTS: "8"
+      SLIDER_RESULT_TIMEOUT_MS: "10000"
+      SLIDER_RETRY_DELAY_MIN: "3"
+      SLIDER_RETRY_DELAY_MAX: "6"
+      SLIDER_FINAL_GRACE_SECONDS: "15"
+      HTTP_TIMEOUT_SECONDS: "90"
+      EXCHANGE_DELAY_MIN: "2"
+      EXCHANGE_DELAY_MAX: "4"
+      DRAW_DELAY_MIN: "5"
+      DRAW_DELAY_MAX: "8"
+      POST_DRAW_SETTLE_DELAY_MIN: "2"
+      POST_DRAW_SETTLE_DELAY_MAX: "4"
+      EXCHANGE_ARRIVAL_RETRIES: "3"
+      EXCHANGE_ARRIVAL_DELAY_MIN: "2"
+      EXCHANGE_ARRIVAL_DELAY_MAX: "4"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 在新 Runner 安装依赖
+        run: |
+          python -m pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: 选择重试账号
+        shell: python
+        run: |
+          import os
+
+          lines = [line.strip() for line in os.environ["ACCOUNTS"].splitlines() if line.strip()]
+          index = int(os.environ["ACCOUNT_INDEX"])
+          if index < 1 or index > len(lines):
+              raise SystemExit(f"账号序号越界: {index}/{len(lines)}")
+          username, separator, password = lines[index - 1].partition(",")
+          if not separator or not username.strip() or not password.strip():
+              raise SystemExit(f"账号第 {index} 行格式错误")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:
+              stream.write("ACCOUNT_USERNAME<<__BRAND_USERNAME__\n")
+              stream.write(username.strip() + "\n")
+              stream.write("__BRAND_USERNAME__\n")
+              stream.write("ACCOUNT_PASSWORD<<__BRAND_PASSWORD__\n")
+              stream.write(password.strip() + "\n")
+              stream.write("__BRAND_PASSWORD__\n")
+
+      - name: 在新 Runner 重试登录并抽奖
+        continue-on-error: true
+        run: python lottery.py --index "$ACCOUNT_INDEX" --output result.json
+
+      - name: 缺失重试结果兜底
+        if: always()
+        shell: python
+        run: |
+          import json
+          import os
+          from datetime import datetime, timedelta, timezone
+
+          if os.path.exists("result.json"):
+              raise SystemExit(0)
+          index = int(os.environ["ACCOUNT_INDEX"])
+          now = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+          payload = {
+              "generated_at": now,
+              "results": [{
+                  "account_index": index,
+                  "masked_username": f"账号{index}",
+                  "status": "failed",
+                  "success": False,
+                  "detail": "新 Runner 重试脚本未生成 result.json",
+                  "prizes": [],
+                  "completed_at": now,
+              }],
+          }
+          with open("result.json", "w", encoding="utf-8") as stream:
+              json.dump(payload, stream, ensure_ascii=False, indent=2)
+
+      - name: 上传新 Runner 重试结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ inputs.group_name }}-${{ matrix.index }}-retry1
+          path: result.json
+          retention-days: 14
+
+  report:
+    needs: [prepare, lottery, prepare_retry, retry_lottery]
     if: always() && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     steps:
