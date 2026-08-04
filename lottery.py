@@ -11,7 +11,7 @@ import re
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -70,10 +70,15 @@ SUBMIT_SELECTORS = ('#submitLogin', 'button[type="submit"]', 'button.el-button--
 PASSWORD_ERROR_RE = re.compile(r"账号或密码不正确|用户名或密码错误|密码错误|登录失败")
 PENDING_HINT_RE = re.compile(r"活动还未开始|活动未开始|不在活动时间|活动已结束")
 INSUFFICIENT_POINTS_RE = re.compile(r"金豆不足|可用金豆不足|积分不足|余额不足")
+UTC_PLUS_8 = timezone(timedelta(hours=8))
 
 
 class LotteryError(RuntimeError):
     pass
+
+
+def utc8_now() -> datetime:
+    return datetime.now(UTC_PLUS_8)
 
 
 def require_brand_token() -> None:
@@ -96,9 +101,9 @@ class PrizeRecord:
     prize_code: str = ""
     win_code: str = ""
     turn_code: str = ""
-    won_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    won_at: str = field(default_factory=lambda: utc8_now().strftime("%Y-%m-%d %H:%M:%S"))
     expiry_date: str = field(
-        default_factory=lambda: (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+        default_factory=lambda: (utc8_now() + timedelta(days=7)).strftime("%Y-%m-%d")
     )
 
 
@@ -121,7 +126,7 @@ class LotteryCycleResult:
 
 
 def log(message: str) -> None:
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}", flush=True)
+    print(f"[{utc8_now().strftime('%H:%M:%S')}] {message}", flush=True)
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -894,7 +899,7 @@ def result_template(account: str, account_index: int) -> dict[str, Any]:
         "blind_box_coupons": [],
         "blind_box_can_popup": False,
         "blind_box_detail": "",
-        "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "started_at": utc8_now().strftime("%Y-%m-%d %H:%M:%S"),
         "completed_at": "",
     }
 
@@ -1035,7 +1040,7 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
             result["detail"] = re.sub(r"[\r\n]+", " ", str(exc))[:1000]
             log(f"账号 {mask_account(account)} 执行失败: {result['detail']}")
         finally:
-            result["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            result["completed_at"] = utc8_now().strftime("%Y-%m-%d %H:%M:%S")
             context.close()
             browser.close()
     return result
@@ -1044,7 +1049,7 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
 def write_result(path: Path, result: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "generated_at": utc8_now().strftime("%Y-%m-%d %H:%M:%S"),
         "activity_code": os.getenv("LOTTERY_ACTIVITY_CODE", DEFAULT_ACTIVITY_CODE),
         "activity_access_id": os.getenv("ACTIVITY_ACCESS_ID", DEFAULT_ACTIVITY_ACCESS_ID),
         "results": [result],
@@ -1075,7 +1080,7 @@ def main() -> int:
     except Exception as exc:
         result = result_template(account, args.index)
         result["detail"] = re.sub(r"[\r\n]+", " ", str(exc))[:1000]
-        result["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        result["completed_at"] = utc8_now().strftime("%Y-%m-%d %H:%M:%S")
         log(f"账号 {mask_account(account)} 初始化失败: {result['detail']}")
     write_result(Path(args.output).resolve(), result)
     return 0 if result["status"] in {"completed", "pending"} else 1

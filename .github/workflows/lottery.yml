@@ -134,13 +134,14 @@ jobs:
         run: |
           import json
           import os
-          from datetime import datetime
+          from datetime import datetime, timedelta, timezone
 
           if os.path.exists("result.json"):
               raise SystemExit(0)
           index = int(os.environ["ACCOUNT_INDEX"])
+          now = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
           payload = {
-              "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+              "generated_at": now,
               "results": [{
                   "account_index": index,
                   "masked_username": f"账号{index}",
@@ -148,7 +149,7 @@ jobs:
                   "success": False,
                   "detail": "脚本未生成 result.json",
                   "prizes": [],
-                  "completed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                  "completed_at": now,
               }],
           }
           with open("result.json", "w", encoding="utf-8") as stream:

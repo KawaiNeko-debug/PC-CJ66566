@@ -8,7 +8,7 @@ import json
 import os
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,11 @@ HEADERS = [
     "详情",
     "完成时间",
 ]
+UTC_PLUS_8 = timezone(timedelta(hours=8))
+
+
+def utc8_now() -> datetime:
+    return datetime.now(UTC_PLUS_8)
 
 
 def load_result_files(root: Path) -> list[dict[str, Any]]:
@@ -137,7 +142,7 @@ def safe_sheet_title(name: str, used: set[str]) -> str:
 def summary_payload(records: list[dict[str, Any]]) -> dict[str, Any]:
     coupons = coupon_assignments(records)
     return {
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "generated_at": utc8_now().strftime("%Y-%m-%d %H:%M:%S"),
         "total_accounts": len(records),
         "completed_accounts": sum(1 for row in records if row.get("status") == "completed"),
         "pending_accounts": sum(1 for row in records if row.get("status") == "pending"),
