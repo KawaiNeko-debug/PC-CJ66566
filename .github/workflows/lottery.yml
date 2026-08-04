@@ -25,30 +25,15 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.accounts.outputs.matrix }}
-      should_run: ${{ steps.accounts.outputs.should_run }}
     env:
       ACCOUNTS: ${{ secrets.ACCOUNTS }}
-      EVENT_NAME: ${{ github.event_name }}
     steps:
       - id: accounts
         shell: python
         run: |
           import json
           import os
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-
-          event_name = os.environ.get("EVENT_NAME", "")
-          today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
-          should_run = event_name != "schedule" or "2026-08-05" <= today <= "2026-08-07"
           output = os.environ["GITHUB_OUTPUT"]
-
-          if not should_run:
-              with open(output, "a", encoding="utf-8") as stream:
-                  stream.write("should_run=false\n")
-                  stream.write('matrix={"include":[{"index":1}]}\n')
-              print(f"定时任务日期 {today} 不在活动进行期，跳过。")
-              raise SystemExit(0)
 
           lines = [line.strip() for line in os.environ.get("ACCOUNTS", "").splitlines() if line.strip()]
           if not lines:
@@ -65,13 +50,11 @@ jobs:
 
           matrix = {"include": [{"index": index} for index in range(1, len(lines) + 1)]}
           with open(output, "a", encoding="utf-8") as stream:
-              stream.write("should_run=true\n")
               stream.write("matrix=" + json.dumps(matrix, separators=(",", ":")) + "\n")
           print(f"已准备 {len(lines)} 个账号")
 
   lottery:
     needs: prepare
-    if: needs.prepare.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -181,7 +164,7 @@ jobs:
 
   report:
     needs: [prepare, lottery]
-    if: always() && needs.prepare.outputs.should_run == 'true'
+    if: always() && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
