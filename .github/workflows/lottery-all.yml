@@ -1,4 +1,4 @@
-name: 顺序启动全部抽奖组
+name: PC普通抽奖组
 
 on:
   workflow_dispatch:

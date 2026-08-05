@@ -1,4 +1,4 @@
-name: 抽奖复用执行器
+name: PC普通抽奖组-复用执行器
 
 on:
   workflow_call:

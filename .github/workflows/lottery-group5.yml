@@ -1,4 +1,4 @@
-name: 抽奖账号组5
+name: PC普通抽奖组5
 
 on:
   workflow_dispatch:

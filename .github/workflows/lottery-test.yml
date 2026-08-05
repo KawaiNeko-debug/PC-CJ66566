@@ -1,4 +1,4 @@
-name: 抽奖测试组
+name: PC普通抽奖组-测试
 
 on:
   workflow_dispatch:
