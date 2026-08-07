@@ -206,3 +206,4 @@ jobs:
             merged/mall-result.json
             merged/mall-lottery-summary.xlsx
           retention-days: 30
+
