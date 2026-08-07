@@ -227,6 +227,8 @@ def login_mall_sso(
     deadline = time.time() + timeout_seconds
     next_log = time.time() + 15
     slider_attempts = 0
+    slider_rounds = 0
+    slider_round_limit = max(1, env_int("SLIDER_MAX_ROUNDS", 3))
 
     while time.time() < deadline:
         if detect_password_error(page):
@@ -247,6 +249,12 @@ def login_mall_sso(
         except Exception:
             slider_visible = False
         if slider_visible:
+            slider_rounds += 1
+            if slider_rounds > slider_round_limit:
+                raise LotteryError(
+                    f"商城 SSO 滑块重复出现，已处理 {slider_rounds - 1} 轮；"
+                    "请检查账号密码或在非自动化浏览器中完成一次登录"
+                )
             slider_attempts += 1
             solve_slider(page, max_attempts=max(1, env_int("SLIDER_MAX_ATTEMPTS", 8)))
             next_log = time.time() + 15
