@@ -51,7 +51,8 @@ from lottery import (  # noqa: E402
 
 BRAND_TOKEN = os.getenv("BRAND_TOKEN", "").strip()
 PASSPORT_ORIGIN = f"https://passport.{BRAND_TOKEN.lower()}.com" if BRAND_TOKEN else ""
-PASSPORT_LOGIN_URL = f"{PASSPORT_ORIGIN}/login" if PASSPORT_ORIGIN else ""
+PASSPORT_LOGIN_URL = f"{PASSPORT_ORIGIN}/window/login" if PASSPORT_ORIGIN else ""
+PASSPORT_APP_ID = f"{BRAND_TOKEN.upper()}_PORTAL_PC" if BRAND_TOKEN else ""
 MALL_DOMAIN = f"{''.join(chr(code) for code in (115, 122, 108, 99, 115, 99))}.com"
 MALL_HOME_URL = f"https://www.{MALL_DOMAIN}/"
 MALL_ACTIVITY_ORIGIN = f"https://activity.{MALL_DOMAIN}"
@@ -111,6 +112,14 @@ def _text(node: dict[str, Any], *keys: str) -> str:
         if isinstance(value, (str, int, float)) and str(value).strip():
             return str(value).strip()
     return ""
+
+
+def _mall_login_url() -> str:
+    query = (
+        f"appId={quote(PASSPORT_APP_ID, safe='')}&"
+        f"redirectUrl={quote(MALL_HOME_URL, safe='')}"
+    )
+    return f"{PASSPORT_LOGIN_URL}?{query}"
 
 
 def _date_part(value: str) -> str:
@@ -177,7 +186,7 @@ def _fill_login_form(page: Page, account: str, password: str) -> None:
     for attempt in range(1, form_attempts + 1):
         goto_with_retry(
             page,
-            f"{PASSPORT_LOGIN_URL}?redirect={quote(MALL_HOME_URL, safe='')}",
+            _mall_login_url(),
             f"打开商城 SSO 登录页（表单尝试 {attempt}/{form_attempts}）",
         )
         if click_account_login_tab(page, timeouts["component"]):
@@ -247,6 +256,7 @@ def login_mall_sso(
     slider_attempts = 0
     slider_rounds = 0
     slider_round_limit = max(1, env_int("SLIDER_MAX_ROUNDS", 3))
+    mall_callback_started = False
 
     while time.time() < deadline:
         if detect_password_error(page):
@@ -260,6 +270,16 @@ def login_mall_sso(
         if mall_cookies.get(MALL_SESSION_COOKIE):
             log("商城 SSO 登录成功，已取得会话 Cookie")
             return mall_cookies
+
+        if (
+            not mall_callback_started
+            and cookies.get("tgc")
+            and cookies.get(PROD_CAS_COOKIE)
+        ):
+            mall_callback_started = True
+            goto_with_retry(page, MALL_HOME_URL, "完成商城 SSO 回调")
+            next_log = time.time() + 15
+            continue
 
         slider = page.locator("#aliyunCaptcha-sliding-slider")
         try:
