@@ -217,10 +217,28 @@ def _fill_login_form(page: Page, account: str, password: str) -> None:
     log("已提交商城 SSO 登录表单")
 
 
+def _initialize_mall_session(page: Page, context: BrowserContext) -> set[str]:
+    """Open the campaign once so its activity-domain cookies exist for SSO."""
+    goto_with_retry(page, CAMPAIGN_URL, "初始化商城活动会话")
+    cookie_names = {
+        item.get("name", "")
+        for item in context.cookies(CAMPAIGN_URL)
+        if item.get("value")
+    }
+    log(
+        "商城活动会话初始化完成："
+        f"活动 Cookie={'是' if cookie_names else '否'}，"
+        f"商城会话 Cookie={'是' if MALL_SESSION_COOKIE in cookie_names else '否'}"
+    )
+    return cookie_names
+
+
 def login_mall_sso(
     page: Page, context: BrowserContext, account: str, password: str
 ) -> dict[str, str]:
     require_brand_token()
+
+    _initialize_mall_session(page, context)
     _fill_login_form(page, account, password)
     hosted = env_bool("GITHUB_ACTIONS", False)
     timeout_seconds = max(60, env_int("LOGIN_TIMEOUT_SECONDS", 300 if hosted else 180))
