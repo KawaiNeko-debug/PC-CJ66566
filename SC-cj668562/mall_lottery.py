@@ -412,10 +412,25 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
             browser = playwright.chromium.launch(
                 headless=env_bool("HEADLESS", True),
                 timeout=max(60_000, env_int("BROWSER_LAUNCH_TIMEOUT_MS", 120_000)),
-                args=["--disable-dev-shm-usage", "--no-sandbox"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                ],
             )
-            context = browser.new_context(user_agent=DESKTOP_USER_AGENT, locale="zh-CN")
+            context = browser.new_context(
+                user_agent=DESKTOP_USER_AGENT,
+                viewport={"width": 1365, "height": 900},
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+            )
+            context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            )
             page = context.new_page()
+            timeouts = runtime_timeouts()
+            page.set_default_timeout(timeouts["component"])
+            page.set_default_navigation_timeout(timeouts["navigation"])
             try:
                 login_mall_sso(page, context, account, password)
                 client = MallCampaignClient(page, uuid)
