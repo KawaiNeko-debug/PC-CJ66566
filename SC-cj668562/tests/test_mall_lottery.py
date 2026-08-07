@@ -13,6 +13,7 @@ from mall_lottery import (  # noqa: E402
     DEFAULT_ACTIVITY_UUID,
     MALL_DOMAIN,
     MallPrizeRecord,
+    _initialize_mall_session,
     activity_uuid,
     parse_available_chances,
     parse_draw_prize,
@@ -21,6 +22,23 @@ from mall_lottery import (  # noqa: E402
 
 
 class MallParsingTests(unittest.TestCase):
+    @patch("mall_lottery.goto_with_retry")
+    def test_initialize_mall_session_visits_campaign_and_only_returns_names(self, goto):
+        class FakePage:
+            pass
+
+        class FakeContext:
+            def cookies(self, url):
+                self.url = url
+                return [
+                    {"name": "activity_seed", "value": "redacted"},
+                    {"name": "PRO_NEW_SID", "value": "redacted"},
+                ]
+
+        names = _initialize_mall_session(FakePage(), FakeContext())
+        goto.assert_called_once()
+        self.assertEqual(names, {"activity_seed", "PRO_NEW_SID"})
+
     def test_domain_is_constructed_at_runtime(self):
         expected = "".join(chr(code) for code in (115, 122, 108, 99, 115, 99)) + ".com"
         self.assertEqual(MALL_DOMAIN, expected)
