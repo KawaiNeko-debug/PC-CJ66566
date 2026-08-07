@@ -1,10 +1,10 @@
-name: 商城抽奖组-复用执行器
+name: 鍟嗗煄鎶藉缁?澶嶇敤鎵ц鍣?
 
 on:
   workflow_call:
     inputs:
       group_name:
-        description: 商城账号组名称
+        description: 鍟嗗煄璐﹀彿缁勫悕绉?
         required: true
         type: string
     secrets:
@@ -36,7 +36,7 @@ jobs:
 
           lines = [line.strip() for line in os.environ.get("ACCOUNTS", "").splitlines() if line.strip()]
           if not lines:
-              print("::error title=缺少 GitHub Secret::商城账号 Secret 为空或未创建")
+              print("::error title=缂哄皯 GitHub Secret::鍟嗗煄璐﹀彿 Secret 涓虹┖鎴栨湭鍒涘缓")
               raise SystemExit(1)
           invalid = []
           for index, line in enumerate(lines, 1):
@@ -44,13 +44,13 @@ jobs:
               if not separator or not username.strip() or not password.strip():
                   invalid.append(index)
           if invalid:
-              print(f"::error title=账号格式错误::第 {invalid} 行必须使用 客编,密码 格式")
+              print(f"::error title=璐﹀彿鏍煎紡閿欒::绗?{invalid} 琛屽繀椤讳娇鐢?瀹㈢紪,瀵嗙爜 鏍煎紡")
               raise SystemExit(1)
 
           matrix = {"include": [{"index": index} for index in range(1, len(lines) + 1)]}
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
               stream.write("matrix=" + json.dumps(matrix, separators=(",", ":")) + "\n")
-          print(f"已准备 {len(lines)} 个商城账号")
+          print(f"宸插噯澶?{len(lines)} 涓晢鍩庤处鍙?)
 
   lottery:
     needs: prepare
@@ -58,7 +58,7 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 20
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     env:
       ACCOUNTS: ${{ secrets.ACCOUNTS }}
@@ -78,6 +78,7 @@ jobs:
       LOGIN_TIMEOUT_SECONDS: "300"
       SLIDER_APPEAR_TIMEOUT_MS: "60000"
       SLIDER_MAX_ATTEMPTS: "8"
+      SLIDER_MAX_ROUNDS: "3"
       SLIDER_RESULT_TIMEOUT_MS: "10000"
       SLIDER_RETRY_DELAY_MIN: "3"
       SLIDER_RETRY_DELAY_MAX: "6"
@@ -94,12 +95,12 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: 安装依赖
+      - name: 瀹夎渚濊禆
         run: |
           python -m pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: 选择商城账号
+      - name: 閫夋嫨鍟嗗煄璐﹀彿
         shell: python
         run: |
           import os
@@ -107,10 +108,10 @@ jobs:
           lines = [line.strip() for line in os.environ["ACCOUNTS"].splitlines() if line.strip()]
           index = int(os.environ["ACCOUNT_INDEX"])
           if index < 1 or index > len(lines):
-              raise SystemExit(f"商城账号序号越界: {index}/{len(lines)}")
+              raise SystemExit(f"鍟嗗煄璐﹀彿搴忓彿瓒婄晫: {index}/{len(lines)}")
           username, separator, password = lines[index - 1].partition(",")
           if not separator or not username.strip() or not password.strip():
-              raise SystemExit(f"商城账号第 {index} 行格式错误")
+              raise SystemExit(f"鍟嗗煄璐﹀彿绗?{index} 琛屾牸寮忛敊璇?)
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:
               stream.write("ACCOUNT_USERNAME<<__MALL_USERNAME__\n")
               stream.write(username.strip() + "\n")
@@ -119,7 +120,7 @@ jobs:
               stream.write(password.strip() + "\n")
               stream.write("__MALL_PASSWORD__\n")
 
-      - name: 登录并抽完商城次数
+      - name: 鐧诲綍骞舵娊瀹屽晢鍩庢鏁?
         id: run
         continue-on-error: true
         run: >-
@@ -127,7 +128,7 @@ jobs:
           --index "$ACCOUNT_INDEX"
           --output result.json
 
-      - name: 缺失结果兜底
+      - name: 缂哄け缁撴灉鍏滃簳
         if: always()
         shell: python
         run: |
@@ -144,10 +145,10 @@ jobs:
               "results": [{
                   "account_index": index,
                   "group_name": os.environ.get("GROUP_NAME", ""),
-                  "masked_username": f"商城账号{index}",
+                  "masked_username": f"鍟嗗煄璐﹀彿{index}",
                   "status": "failed",
                   "success": False,
-                  "detail": "商城脚本未生成 result.json",
+                  "detail": "鍟嗗煄鑴氭湰鏈敓鎴?result.json",
                   "initial_chances": 0,
                   "draw_count": 0,
                   "remaining_chances": 0,
@@ -159,7 +160,7 @@ jobs:
           with open("result.json", "w", encoding="utf-8") as stream:
               json.dump(payload, stream, ensure_ascii=False, indent=2)
 
-      - name: 上传商城账号结果
+      - name: 涓婁紶鍟嗗煄璐﹀彿缁撴灉
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -181,13 +182,13 @@ jobs:
 
       - run: python -m pip install openpyxl==3.1.5 requests==2.32.4
 
-      - name: 下载商城账号结果
+      - name: 涓嬭浇鍟嗗煄璐﹀彿缁撴灉
         uses: actions/download-artifact@v4
         with:
           pattern: mall-result-${{ inputs.group_name }}-*
           path: artifacts
 
-      - name: 生成商城 JSON/XLSX 并发送 TG
+      - name: 鐢熸垚鍟嗗煄 JSON/XLSX 骞跺彂閫?TG
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -197,7 +198,7 @@ jobs:
           --xlsx merged/mall-lottery-summary.xlsx
           --telegram
 
-      - name: 上传商城汇总
+      - name: 涓婁紶鍟嗗煄姹囨€?
         uses: actions/upload-artifact@v4
         with:
           name: mall-campaign-summary-${{ inputs.group_name }}
@@ -205,3 +206,4 @@ jobs:
             merged/mall-result.json
             merged/mall-lottery-summary.xlsx
           retention-days: 30
+
