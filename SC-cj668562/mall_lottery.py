@@ -92,16 +92,16 @@ def api_succeeded(payload: Any) -> bool:
 def activity_uuid() -> str:
     value = os.getenv("MALL_ACTIVITY_UUID", DEFAULT_ACTIVITY_UUID).strip().upper()
     if len(value) != 32 or any(character not in "0123456789ABCDEF" for character in value):
-        raise LotteryError("MALL_ACTIVITY_UUID 必须是 32 位十六进制字符串")
+        raise LotteryError("MALL_ACTIVITY_UUID 蹇呴』鏄?32 浣嶅崄鍏繘鍒跺瓧绗︿覆")
     return value
 
 
 def parse_available_chances(payload: Any) -> int:
     if not api_succeeded(payload):
-        raise LotteryError(f"获取商城抽奖次数失败: {response_message(payload)}")
+        raise LotteryError(f"鑾峰彇鍟嗗煄鎶藉娆℃暟澶辫触: {response_message(payload)}")
     result = payload.get("result") if isinstance(payload, dict) else None
     if not isinstance(result, dict):
-        raise LotteryError("商城抽奖次数响应缺少 result")
+        raise LotteryError("鍟嗗煄鎶藉娆℃暟鍝嶅簲缂哄皯 result")
     return max(0, safe_int(result.get("drawNum"), 0))
 
 
@@ -133,15 +133,15 @@ class MallPrizeRecord:
 
 def parse_draw_prize(payload: Any, draw_index: int) -> MallPrizeRecord:
     if not api_succeeded(payload):
-        raise LotteryError(f"商城抽奖失败: {response_message(payload)}")
+        raise LotteryError(f"鍟嗗煄鎶藉澶辫触: {response_message(payload)}")
     result = payload.get("result") if isinstance(payload, dict) else None
     if not isinstance(result, dict):
-        raise LotteryError("商城抽奖成功响应缺少 result")
+        raise LotteryError("鍟嗗煄鎶藉鎴愬姛鍝嶅簲缂哄皯 result")
     valid_begin = _text(result, "prizeValidBeginTime", "validBeginTime")
     valid_end = _text(result, "prizeValidEndTime", "validEndTime")
     return MallPrizeRecord(
         draw_index=draw_index,
-        title=_text(result, "prizeName", "awardName", "title", "name") or "抽奖成功（奖品名为空）",
+        title=_text(result, "prizeName", "awardName", "title", "name") or "鎶藉鎴愬姛锛堝鍝佸悕涓虹┖锛?,
         prize_type=_text(result, "prizeType", "awardType", "type"),
         prize_id=_text(result, "lotteryActivityPrizeId", "prizeId", "awardId"),
         valid_begin=valid_begin,
@@ -178,19 +178,19 @@ def _fill_login_form(page: Page, account: str, password: str) -> None:
         goto_with_retry(
             page,
             f"{PASSPORT_LOGIN_URL}?redirect={quote(MALL_HOME_URL, safe='')}",
-            f"打开商城 SSO 登录页（表单尝试 {attempt}/{form_attempts}）",
+            f"鎵撳紑鍟嗗煄 SSO 鐧诲綍椤碉紙琛ㄥ崟灏濊瘯 {attempt}/{form_attempts}锛?,
         )
         if click_account_login_tab(page, timeouts["component"]):
             account_input = visible_locator(
-                page, ACCOUNT_SELECTORS, timeouts["component"], "账号输入框"
+                page, ACCOUNT_SELECTORS, timeouts["component"], "璐﹀彿杈撳叆妗?
             )
             password_input = visible_locator(
-                page, PASSWORD_SELECTORS, timeouts["component"], "密码输入框"
+                page, PASSWORD_SELECTORS, timeouts["component"], "瀵嗙爜杈撳叆妗?
             )
         if account_input is not None and password_input is not None:
             break
     if account_input is None or password_input is None:
-        raise LotteryError("商城 SSO 登录表单未完整加载")
+        raise LotteryError("鍟嗗煄 SSO 鐧诲綍琛ㄥ崟鏈畬鏁村姞杞?)
 
     account_input.fill(account)
     random_delay(env_float("FORM_DELAY_MIN", 0.8), env_float("FORM_DELAY_MAX", 1.8))
@@ -198,7 +198,7 @@ def _fill_login_form(page: Page, account: str, password: str) -> None:
     random_delay(env_float("FORM_DELAY_MIN", 0.8), env_float("FORM_DELAY_MAX", 1.8))
 
     agreement = visible_locator(
-        page, AGREEMENT_SELECTORS, min(10_000, timeouts["component"]), "同意协议控件"
+        page, AGREEMENT_SELECTORS, min(10_000, timeouts["component"]), "鍚屾剰鍗忚鎺т欢"
     )
     if agreement is not None:
         try:
@@ -210,11 +210,11 @@ def _fill_login_form(page: Page, account: str, password: str) -> None:
         except Exception:
             pass
 
-    submit = visible_locator(page, SUBMIT_SELECTORS, timeouts["component"], "登录按钮")
+    submit = visible_locator(page, SUBMIT_SELECTORS, timeouts["component"], "鐧诲綍鎸夐挳")
     if submit is None:
-        raise LotteryError("商城 SSO 登录按钮未加载")
+        raise LotteryError("鍟嗗煄 SSO 鐧诲綍鎸夐挳鏈姞杞?)
     submit.click(timeout=min(30_000, timeouts["component"]))
-    log("已提交商城 SSO 登录表单")
+    log("宸叉彁浜ゅ晢鍩?SSO 鐧诲綍琛ㄥ崟")
 
 
 def login_mall_sso(
@@ -227,10 +227,12 @@ def login_mall_sso(
     deadline = time.time() + timeout_seconds
     next_log = time.time() + 15
     slider_attempts = 0
+    slider_rounds = 0
+    slider_round_limit = max(1, env_int("SLIDER_MAX_ROUNDS", 3))
 
     while time.time() < deadline:
         if detect_password_error(page):
-            raise LotteryError("账号或密码错误")
+            raise LotteryError("璐﹀彿鎴栧瘑鐮侀敊璇?)
         cookies = current_login_cookies(context)
         mall_cookies = {
             item["name"]: item["value"]
@@ -238,7 +240,7 @@ def login_mall_sso(
             if item.get("value")
         }
         if mall_cookies.get(MALL_SESSION_COOKIE):
-            log("商城 SSO 登录成功，已取得会话 Cookie")
+            log("鍟嗗煄 SSO 鐧诲綍鎴愬姛锛屽凡鍙栧緱浼氳瘽 Cookie")
             return mall_cookies
 
         slider = page.locator("#aliyunCaptcha-sliding-slider")
@@ -247,6 +249,12 @@ def login_mall_sso(
         except Exception:
             slider_visible = False
         if slider_visible:
+            slider_rounds += 1
+            if slider_rounds > slider_round_limit:
+                raise LotteryError(
+                    f"鍟嗗煄 SSO 婊戝潡閲嶅鍑虹幇锛屽凡澶勭悊 {slider_rounds - 1} 杞紱"
+                    "璇锋鏌ヨ处鍙峰瘑鐮佹垨鍦ㄩ潪鑷姩鍖栨祻瑙堝櫒涓畬鎴愪竴娆＄櫥褰?
+                )
             slider_attempts += 1
             solve_slider(page, max_attempts=max(1, env_int("SLIDER_MAX_ATTEMPTS", 8)))
             next_log = time.time() + 15
@@ -254,17 +262,17 @@ def login_mall_sso(
 
         if time.time() >= next_log:
             current_host = urlparse(page.url).hostname or ""
-            stage = "商城回调" if current_host.endswith(MALL_DOMAIN) else "统一登录"
+            stage = "鍟嗗煄鍥炶皟" if current_host.endswith(MALL_DOMAIN) else "缁熶竴鐧诲綍"
             remaining = max(0, int(deadline - time.time()))
-            log(f"等待{stage}写入会话，最多再等待 {remaining}s")
+            log(f"绛夊緟{stage}鍐欏叆浼氳瘽锛屾渶澶氬啀绛夊緟 {remaining}s")
             next_log = time.time() + 15
         time.sleep(max(0.5, env_float("LOGIN_POLL_INTERVAL_SECONDS", 1.0)))
 
     cookies = current_login_cookies(context)
     base_ready = bool(cookies.get("tgc") and cookies.get(PROD_CAS_COOKIE))
-    detail = "统一登录已完成，但商城回调未写入会话" if base_ready else "统一登录未完成"
+    detail = "缁熶竴鐧诲綍宸插畬鎴愶紝浣嗗晢鍩庡洖璋冩湭鍐欏叆浼氳瘽" if base_ready else "缁熶竴鐧诲綍鏈畬鎴?
     raise LotteryError(
-        f"等待商城 SSO 登录超时（{timeout_seconds}s，{detail}，滑块处理 {slider_attempts} 次）"
+        f"绛夊緟鍟嗗煄 SSO 鐧诲綍瓒呮椂锛坽timeout_seconds}s锛寋detail}锛屾粦鍧楀鐞?{slider_attempts} 娆★級"
     )
 
 
@@ -291,13 +299,13 @@ def run_draw_cycle(client: MallClientProtocol, initial_chances: int) -> MallCycl
 
     while remaining > 0:
         if draw_count >= draw_cap:
-            message = f"触发商城抽奖安全上限 {draw_cap}，仍剩余 {remaining} 次"
+            message = f"瑙﹀彂鍟嗗煄鎶藉瀹夊叏涓婇檺 {draw_cap}锛屼粛鍓╀綑 {remaining} 娆?
             break
         draw_index = draw_count + 1
         random_delay(
             env_float("MALL_DRAW_DELAY_MIN", 4.0),
             env_float("MALL_DRAW_DELAY_MAX", 7.0),
-            f"第 {draw_index} 次商城抽奖前缓冲",
+            f"绗?{draw_index} 娆″晢鍩庢娊濂栧墠缂撳啿",
         )
         try:
             prizes.append(client.draw_once(draw_index))
@@ -308,7 +316,7 @@ def run_draw_cycle(client: MallClientProtocol, initial_chances: int) -> MallCycl
         random_delay(
             env_float("MALL_STATE_DELAY_MIN", 1.5),
             env_float("MALL_STATE_DELAY_MAX", 3.0),
-            "等待商城抽奖次数更新",
+            "绛夊緟鍟嗗煄鎶藉娆℃暟鏇存柊",
         )
         try:
             remaining = client.available_chances()
@@ -344,28 +352,28 @@ class MallCampaignClient:
         status = safe_int(response.get("status"), 0) if isinstance(response, dict) else 0
         text = str(response.get("text") or "") if isinstance(response, dict) else ""
         if status < 200 or status >= 300:
-            raise LotteryError(f"商城接口 HTTP 失败: GET {path} HTTP {status}")
+            raise LotteryError(f"鍟嗗煄鎺ュ彛 HTTP 澶辫触: GET {path} HTTP {status}")
         try:
             payload = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise LotteryError(f"商城接口未返回 JSON: GET {path}") from exc
+            raise LotteryError(f"鍟嗗煄鎺ュ彛鏈繑鍥?JSON: GET {path}") from exc
         if not isinstance(payload, dict):
-            raise LotteryError(f"商城接口响应类型错误: GET {path}")
+            raise LotteryError(f"鍟嗗煄鎺ュ彛鍝嶅簲绫诲瀷閿欒: GET {path}")
         return payload
 
     def open_and_verify(self, expected_account: str) -> str:
-        goto_with_retry(self.page, CAMPAIGN_URL, "打开商城活动页")
+        goto_with_retry(self.page, CAMPAIGN_URL, "鎵撳紑鍟嗗煄娲诲姩椤?)
         info = self._get(USER_INFO_PATH)
         if not api_succeeded(info):
-            raise LotteryError(f"商城活动页登录校验失败: {response_message(info)}")
+            raise LotteryError(f"鍟嗗煄娲诲姩椤电櫥褰曟牎楠屽け璐? {response_message(info)}")
         customer_code = _find_customer_code(info)
         if customer_code and customer_code != expected_account.strip().upper():
             raise LotteryError(
-                f"商城登录客编不一致: 期望 {mask_account(expected_account)}，"
-                f"实际 {mask_account(customer_code)}"
+                f"鍟嗗煄鐧诲綍瀹㈢紪涓嶄竴鑷? 鏈熸湜 {mask_account(expected_account)}锛?
+                f"瀹為檯 {mask_account(customer_code)}"
             )
         verified = customer_code or expected_account.strip().upper()
-        log(f"商城活动页 SSO 校验成功: {mask_account(verified)}")
+        log(f"鍟嗗煄娲诲姩椤?SSO 鏍￠獙鎴愬姛: {mask_account(verified)}")
         return verified
 
     def available_chances(self) -> int:
@@ -373,7 +381,7 @@ class MallCampaignClient:
 
     def draw_once(self, draw_index: int) -> MallPrizeRecord:
         prize = parse_draw_prize(self._get(DRAW_PATH, {"uuid": self.uuid}), draw_index)
-        log(f"第 {draw_index} 次商城抽奖: {prize.title}")
+        log(f"绗?{draw_index} 娆″晢鍩庢娊濂? {prize.title}")
         return prize
 
 
@@ -414,7 +422,7 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
                 result["customer_code"] = client.open_and_verify(account)
                 initial_chances = client.available_chances()
                 result["initial_chances"] = initial_chances
-                log(f"商城当前可抽奖 {initial_chances} 次")
+                log(f"鍟嗗煄褰撳墠鍙娊濂?{initial_chances} 娆?)
                 cycle = run_draw_cycle(client, initial_chances)
                 result["draw_count"] = cycle.draw_count
                 result["remaining_chances"] = cycle.remaining_chances
@@ -422,21 +430,21 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
                 result["prizes"] = [asdict(prize) for prize in cycle.prizes]
                 if cycle.message or cycle.remaining_chances > 0:
                     result["status"] = "partial"
-                    result["detail"] = cycle.message or f"仍剩余 {cycle.remaining_chances} 次未抽"
+                    result["detail"] = cycle.message or f"浠嶅墿浣?{cycle.remaining_chances} 娆℃湭鎶?
                 else:
                     result["status"] = "completed"
                     result["success"] = True
                     result["detail"] = (
-                        f"商城抽奖完成，共执行 {cycle.draw_count} 次"
+                        f"鍟嗗煄鎶藉瀹屾垚锛屽叡鎵ц {cycle.draw_count} 娆?
                         if cycle.draw_count
-                        else "商城当前无可用抽奖次数"
+                        else "鍟嗗煄褰撳墠鏃犲彲鐢ㄦ娊濂栨鏁?
                     )
             finally:
                 context.close()
                 browser.close()
     except Exception as exc:
         result["detail"] = str(exc)[:1000]
-        log(f"账号 {mask_account(account)} 商城抽奖失败: {result['detail']}")
+        log(f"璐﹀彿 {mask_account(account)} 鍟嗗煄鎶藉澶辫触: {result['detail']}")
     result["completed_at"] = utc8_now().strftime("%Y-%m-%d %H:%M:%S")
     return result
 
@@ -452,7 +460,7 @@ def write_result(path: Path, result: dict[str, Any]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="商城活动抽奖")
+    parser = argparse.ArgumentParser(description="鍟嗗煄娲诲姩鎶藉")
     parser.add_argument("account", nargs="?", default=os.getenv("ACCOUNT_USERNAME", ""))
     parser.add_argument("password", nargs="?", default=os.getenv("ACCOUNT_PASSWORD", ""))
     parser.add_argument("--index", type=int, default=env_int("ACCOUNT_INDEX", 1))
@@ -465,7 +473,7 @@ def main() -> int:
     account = str(args.account or "").strip()
     password = str(args.password or "")
     if not account or not password:
-        print("缺少商城账号密码，请通过参数或环境变量提供", file=sys.stderr)
+        print("缂哄皯鍟嗗煄璐﹀彿瀵嗙爜锛岃閫氳繃鍙傛暟鎴栫幆澧冨彉閲忔彁渚?, file=sys.stderr)
         return 2
     result = execute_account(account, password, args.index)
     write_result(args.output, result)
@@ -474,3 +482,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
