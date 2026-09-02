@@ -1,20 +1,68 @@
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from lottery import (
+    DEFAULT_ACTIVITY_ACCESS_ID,
+    DEFAULT_ACTIVITY_CODE,
+    EXCHANGE_CHANCE_PATH,
+    VOUCHER_DETAIL_PATH,
     PrizeRecord,
     api_succeeded,
     derive_status,
     is_insufficient_points,
     parse_blind_box_coupons,
+    parse_activity_config,
     parse_exchange_detail,
     parse_lucky_count,
     parse_turn_prizes,
     run_draw_exchange_cycle,
+    write_result,
 )
 
 
 class LotteryParsingTests(unittest.TestCase):
+    def test_current_exchange_api_family(self):
+        self.assertEqual(
+            VOUCHER_DETAIL_PATH,
+            "/api/integral/brand/activity/ns/getVoucherLotteryDetail",
+        )
+        self.assertEqual(
+            EXCHANGE_CHANCE_PATH,
+            "/api/integral/brand/activity/exchangeLotteryChance",
+        )
+
+    def test_parse_server_rendered_activity_config(self):
+        config = parse_activity_config(
+            [
+                "window.__NUXT__={data:[{activityAccessId:'bf69c3403f094a52a787bfae528da7ea',"
+                "activityConfig:{activityName:'2026年第二期会员日',lotteryActivityId:'LAJJT'}}]}"
+            ]
+        )
+        self.assertEqual(config["activity_access_id"], "bf69c3403f094a52a787bfae528da7ea")
+        self.assertEqual(config["activity_code"], "LAJJT")
+        self.assertEqual(config["activity_name"], "2026年第二期会员日")
+
+    def test_missing_server_rendered_activity_config_is_empty(self):
+        self.assertEqual(
+            parse_activity_config(["window.__NUXT__={data:[]}"]),
+            {"activity_access_id": "", "activity_code": "", "activity_name": ""},
+        )
+
+    def test_empty_activity_overrides_fall_back_in_result_file(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"ACTIVITY_ACCESS_ID": "", "LOTTERY_ACTIVITY_CODE": ""},
+        ):
+            output = Path(directory) / "result.json"
+            write_result(output, {"activity_access_id": "", "activity_code": ""})
+            payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(payload["activity_access_id"], DEFAULT_ACTIVITY_ACCESS_ID)
+        self.assertEqual(payload["activity_code"], DEFAULT_ACTIVITY_CODE)
+
     def test_success_false_is_never_accepted_even_with_code_200(self):
         self.assertFalse(api_succeeded({"success": False, "code": 200}))
 
@@ -43,7 +91,7 @@ class LotteryParsingTests(unittest.TestCase):
 
     def test_lucky_count(self):
         self.assertEqual(
-            parse_lucky_count({"success": True, "data": {"activityCode": "LAMD", "count": 5}}),
+            parse_lucky_count({"success": True, "data": {"activityCode": "LAJJT", "count": 5}}),
             5,
         )
 

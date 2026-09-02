@@ -41,14 +41,14 @@ PROD_CAS_COOKIE = f"PROD-{BRAND_UPPER}-CAS-SID" if BRAND_UPPER else ""
 GROUP_SESSION_COOKIE = f"{BRAND_UPPER}GROUP_SESSIONID" if BRAND_UPPER else ""
 CUSTOMER_CODE_COOKIE = f"{BRAND_UPPER}_CUSTOMER_CODE" if BRAND_UPPER else ""
 USER_INFO_PATH = "/api/integral/user/getUserInfo"
-VOUCHER_DETAIL_PATH = "/api/integral/member/day/activity/ns/getVoucherLotteryDetail"
-EXCHANGE_CHANCE_PATH = "/api/integral/member/day/activity/exchangeLotteryChance"
+VOUCHER_DETAIL_PATH = "/api/integral/brand/activity/ns/getVoucherLotteryDetail"
+EXCHANGE_CHANCE_PATH = "/api/integral/brand/activity/exchangeLotteryChance"
 LUCKY_COUNT_PATH = "/api/cgi/operationService/front/lottery/getLuckyKeyCount"
 TURN_PATH = "/api/cgi/operationService/front/lottery/turn"
 BLIND_BOX_PATH = "/api/integral/member/day/activity/selectBlindBoxGiftPopup"
 
-DEFAULT_ACTIVITY_ACCESS_ID = "fc7534debba644c5a0d26af52651d16f"
-DEFAULT_ACTIVITY_CODE = "LAMD"
+DEFAULT_ACTIVITY_ACCESS_ID = "bf69c3403f094a52a787bfae528da7ea"
+DEFAULT_ACTIVITY_CODE = "LAJJT"
 DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -71,6 +71,9 @@ SUBMIT_SELECTORS = ('#submitLogin', 'button[type="submit"]', 'button.el-button--
 PASSWORD_ERROR_RE = re.compile(r"账号或密码不正确|用户名或密码错误|密码错误|登录失败")
 PENDING_HINT_RE = re.compile(r"活动还未开始|活动未开始|不在活动时间|活动已结束")
 INSUFFICIENT_POINTS_RE = re.compile(r"金豆不足|可用金豆不足|积分不足|余额不足")
+ACTIVITY_ACCESS_ID_RE = re.compile(r"activityAccessId\s*:\s*['\"]([A-Fa-f0-9]{32})['\"]")
+LOTTERY_ACTIVITY_ID_RE = re.compile(r"lotteryActivityId\s*:\s*['\"]([A-Za-z0-9_-]+)['\"]")
+ACTIVITY_NAME_RE = re.compile(r"activityName\s*:\s*['\"]([^'\"]+)['\"]")
 UTC_PLUS_8 = timezone(timedelta(hours=8))
 
 
@@ -214,6 +217,27 @@ def parse_lucky_count(payload: Any) -> int:
     if not isinstance(data, dict):
         return 0
     return max(0, safe_int(data.get("count"), 0))
+
+
+def parse_activity_config(script_texts: list[str]) -> dict[str, str]:
+    config = {"activity_access_id": "", "activity_code": "", "activity_name": ""}
+    for text in script_texts:
+        if "activityAccessId" not in text or "lotteryActivityId" not in text:
+            continue
+        access_match = ACTIVITY_ACCESS_ID_RE.search(text)
+        code_match = LOTTERY_ACTIVITY_ID_RE.search(text)
+        if not access_match or not code_match:
+            continue
+        name_match = ACTIVITY_NAME_RE.search(text)
+        config.update(
+            {
+                "activity_access_id": access_match.group(1).lower(),
+                "activity_code": code_match.group(1),
+                "activity_name": name_match.group(1) if name_match else "",
+            }
+        )
+        break
+    return config
 
 
 def _first_text(node: dict[str, Any], keys: tuple[str, ...]) -> str:
@@ -830,11 +854,29 @@ class CampaignClient:
         self.page = page
         self.sso = sso
         self.secret_holder = secret_holder
-        self.activity_access_id = os.getenv("ACTIVITY_ACCESS_ID", DEFAULT_ACTIVITY_ACCESS_ID).strip()
-        self.activity_code = os.getenv("LOTTERY_ACTIVITY_CODE", DEFAULT_ACTIVITY_CODE).strip()
+        access_override = os.getenv("ACTIVITY_ACCESS_ID", "").strip()
+        code_override = os.getenv("LOTTERY_ACTIVITY_CODE", "").strip()
+        self.activity_access_id_overridden = bool(access_override)
+        self.activity_code_overridden = bool(code_override)
+        self.activity_access_id = access_override or DEFAULT_ACTIVITY_ACCESS_ID
+        self.activity_code = code_override or DEFAULT_ACTIVITY_CODE
+        self.activity_name = ""
+
+    def refresh_activity_config(self) -> None:
+        script_texts = self.page.locator("script:not([src])").all_text_contents()
+        config = parse_activity_config(script_texts)
+        if config["activity_access_id"] and not self.activity_access_id_overridden:
+            self.activity_access_id = config["activity_access_id"]
+        if config["activity_code"] and not self.activity_code_overridden:
+            self.activity_code = config["activity_code"]
+        self.activity_name = config["activity_name"]
+        source = "页面配置" if config["activity_access_id"] and config["activity_code"] else "默认配置"
+        label = f"（{self.activity_name}）" if self.activity_name else ""
+        log(f"活动配置{label}: {self.activity_code} / {self.activity_access_id}，来源={source}")
 
     def open_and_verify(self) -> dict[str, Any]:
         goto_with_retry(self.page, CAMPAIGN_URL, "打开品牌活动页")
+        self.refresh_activity_config()
         payload = self.request("GET", USER_INFO_PATH)
         body = payload.get("body") if isinstance(payload, dict) else None
         code = str(body.get("customerCode") or "").strip().upper() if isinstance(body, dict) else ""
@@ -945,6 +987,9 @@ def result_template(account: str, account_index: int) -> dict[str, Any]:
         "username": account,
         "masked_username": mask_account(account),
         "customer_code": "",
+        "activity_name": "",
+        "activity_code": "",
+        "activity_access_id": "",
         "status": "failed",
         "success": False,
         "detail": "",
@@ -1024,6 +1069,9 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
             user_body = user_info.get("body") if isinstance(user_info, dict) else {}
             user_body = user_body if isinstance(user_body, dict) else {}
             result["customer_code"] = sso.customer_code
+            result["activity_name"] = client.activity_name
+            result["activity_code"] = client.activity_code
+            result["activity_access_id"] = client.activity_access_id
             result["initial_points"] = safe_int(user_body.get("canUseVoucher"), 0)
 
             try:
@@ -1115,8 +1163,12 @@ def write_result(path: Path, result: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "generated_at": utc8_now().strftime("%Y-%m-%d %H:%M:%S"),
-        "activity_code": os.getenv("LOTTERY_ACTIVITY_CODE", DEFAULT_ACTIVITY_CODE),
-        "activity_access_id": os.getenv("ACTIVITY_ACCESS_ID", DEFAULT_ACTIVITY_ACCESS_ID),
+        "activity_code": result.get("activity_code")
+        or os.getenv("LOTTERY_ACTIVITY_CODE", "").strip()
+        or DEFAULT_ACTIVITY_CODE,
+        "activity_access_id": result.get("activity_access_id")
+        or os.getenv("ACTIVITY_ACCESS_ID", "").strip()
+        or DEFAULT_ACTIVITY_ACCESS_ID,
         "results": [result],
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
