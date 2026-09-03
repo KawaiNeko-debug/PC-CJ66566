@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a fresh-runner matrix for accounts that failed slider verification."""
+"""Build a fresh-runner matrix for every account that did not complete."""
 
 from __future__ import annotations
 
@@ -18,6 +18,10 @@ def is_slider_failure(record: dict[str, Any]) -> bool:
     return not bool(record.get("success")) and SLIDER_FAILURE in detail
 
 
+def is_retryable_failure(record: dict[str, Any]) -> bool:
+    return not bool(record.get("success")) or str(record.get("status") or "") != "completed"
+
+
 def retry_indices(root: Path) -> list[int]:
     indices: set[int] = set()
     for path in sorted(root.rglob("*.json")):
@@ -29,7 +33,7 @@ def retry_indices(root: Path) -> list[int]:
         if not isinstance(rows, list):
             continue
         for row in rows:
-            if not isinstance(row, dict) or not is_slider_failure(row):
+            if not isinstance(row, dict) or not is_retryable_failure(row):
                 continue
             index = int(row.get("account_index") or 0)
             if index > 0:
@@ -56,7 +60,7 @@ def main() -> int:
     if args.github_output:
         with Path(args.github_output).open("a", encoding="utf-8") as stream:
             stream.write("\n".join(output_lines) + "\n")
-    print(f"需在新 Runner 重试 {len(matrix['include'])} 个滑块失败账号")
+    print(f"需在新 Runner 重试 {len(matrix['include'])} 个未成功账号")
     return 0
 
 

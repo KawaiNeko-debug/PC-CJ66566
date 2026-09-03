@@ -183,7 +183,7 @@ jobs:
           path: initial-results
 
       - id: retry
-        name: 筛选滑块失败账号
+        name: 筛选所有未成功账号
         run: python retry_plan.py initial-results
 
   retry_lottery:
@@ -260,7 +260,7 @@ jobs:
               stream.write(password.strip() + "\n")
               stream.write("__BRAND_PASSWORD__\n")
 
-      - name: 在新 Runner 重试登录并抽奖
+      - name: 在新 Runner 重试未成功账号
         continue-on-error: true
         run: python lottery.py --index "$ACCOUNT_INDEX" --output result.json
 
@@ -335,5 +335,5 @@ jobs:
           name: brand-campaign-summary-${{ inputs.group_name }}
           path: |
             merged/result.json
-            merged/lottery-summary.xlsx
+            merged/lottery-summary-*.xlsx
           retention-days: 30

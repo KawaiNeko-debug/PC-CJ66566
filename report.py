@@ -31,18 +31,26 @@ BASE_HEADERS = [
     "兑换次数",
     "实际抽奖",
     "剩余次数",
-    "未抽完",
+    "未完成",
     "盲盒优惠券",
 ]
 UTC_PLUS_8 = timezone(timedelta(hours=8))
+TIMESTAMPED_XLSX_RE = re.compile(r"-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}$")
 
 
 def utc8_now() -> datetime:
     return datetime.now(UTC_PLUS_8)
 
 
+def timestamped_xlsx_path(path: Path, now: datetime | None = None) -> Path:
+    if TIMESTAMPED_XLSX_RE.search(path.stem):
+        return path
+    stamp = (now or utc8_now()).strftime("%Y-%m-%d_%H-%M")
+    return path.with_name(f"{path.stem}-{stamp}{path.suffix}")
+
+
 def load_result_files(root: Path) -> list[dict[str, Any]]:
-    records: dict[int, dict[str, Any]] = {}
+    attempts: dict[int, list[dict[str, Any]]] = {}
     for path in sorted(root.rglob("*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -57,10 +65,66 @@ def load_result_files(root: Path) -> list[dict[str, Any]]:
             index = int(row.get("account_index") or 0)
             if index <= 0:
                 continue
-            current = records.get(index)
-            if current is None or str(row.get("completed_at") or "") >= str(current.get("completed_at") or ""):
-                records[index] = row
-    return [records[index] for index in sorted(records)]
+            attempts.setdefault(index, []).append(row)
+    return [merge_account_attempts(attempts[index]) for index in sorted(attempts)]
+
+
+def merge_account_attempts(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    ordered = sorted(attempts, key=lambda row: str(row.get("completed_at") or ""))
+    latest = dict(ordered[-1])
+    earliest = ordered[0]
+    latest["initial_points"] = int(earliest.get("initial_points") or 0)
+    latest["initial_chances"] = int(earliest.get("initial_chances") or 0)
+    latest["exchange_attempted"] = sum(
+        int(row.get("exchange_attempted") or 0) for row in ordered
+    )
+    latest["exchange_succeeded"] = sum(
+        int(row.get("exchange_succeeded") or 0) for row in ordered
+    )
+
+    prizes: list[dict[str, Any]] = []
+    draw_offset = 0
+    seen_prizes: set[tuple[str, ...]] = set()
+    for row in ordered:
+        local_draw_count = int(row.get("draw_count") or 0)
+        local_max_index = 0
+        for prize in row.get("prizes") or []:
+            if not isinstance(prize, dict):
+                continue
+            local_index = max(1, int(prize.get("draw_index") or 0))
+            local_max_index = max(local_max_index, local_index)
+            key = (
+                str(prize.get("win_code") or ""),
+                str(prize.get("prize_code") or ""),
+                str(prize.get("won_at") or ""),
+                str(prize.get("title") or ""),
+            )
+            if key in seen_prizes:
+                continue
+            seen_prizes.add(key)
+            merged_prize = dict(prize)
+            merged_prize["draw_index"] = draw_offset + local_index
+            prizes.append(merged_prize)
+        draw_offset += max(local_draw_count, local_max_index)
+    latest["prizes"] = prizes
+    latest["draw_count"] = draw_offset
+
+    coupons: list[dict[str, Any]] = []
+    seen_coupons: set[tuple[str, str]] = set()
+    for row in ordered:
+        for coupon in row.get("blind_box_coupons") or []:
+            if not isinstance(coupon, dict):
+                continue
+            key = (
+                str(coupon.get("name") or coupon.get("couponName") or "").strip(),
+                str(coupon.get("business_line") or coupon.get("businessLine") or "").strip(),
+            )
+            if not key[0] or key in seen_coupons:
+                continue
+            seen_coupons.add(key)
+            coupons.append(dict(coupon))
+    latest["blind_box_coupons"] = coupons
+    return latest
 
 
 def prize_text(record: dict[str, Any]) -> str:
@@ -98,7 +162,12 @@ def final_remaining(record: dict[str, Any]) -> int:
 
 
 def is_unfinished(record: dict[str, Any]) -> bool:
-    return bool(record.get("unfinished")) or final_remaining(record) > 0
+    return (
+        bool(record.get("unfinished"))
+        or final_remaining(record) > 0
+        or not bool(record.get("success"))
+        or str(record.get("status") or "") != "completed"
+    )
 
 
 def coupon_assignments(records: list[dict[str, Any]]) -> dict[str, list[str]]:
@@ -148,6 +217,7 @@ def summary_payload(records: list[dict[str, Any]]) -> dict[str, Any]:
         "total_exchanged": sum(int(row.get("exchange_succeeded") or 0) for row in records),
         "total_draws": sum(int(row.get("draw_count") or 0) for row in records),
         "unfinished_accounts": sum(1 for row in records if is_unfinished(row)),
+        "remaining_accounts": sum(1 for row in records if final_remaining(row) > 0),
         "coupon_types": len(coupons),
         "coupon_assignments": sum(len(accounts) for accounts in coupons.values()),
         "results": records,
@@ -189,6 +259,15 @@ def report_status(record: dict[str, Any]) -> str:
 
 
 def first_draw_time(record: dict[str, Any]) -> str:
+    def to_minute(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return text
+
     prizes = record.get("prizes")
     if isinstance(prizes, list):
         ordered = sorted(
@@ -198,9 +277,9 @@ def first_draw_time(record: dict[str, Any]) -> str:
         for prize in ordered:
             won_at = str(prize.get("won_at") or "").strip()
             if won_at:
-                return won_at.rsplit(" ", 1)[-1]
+                return to_minute(won_at)
     completed_at = str(record.get("completed_at") or "").strip()
-    return completed_at.rsplit(" ", 1)[-1] if completed_at else ""
+    return to_minute(completed_at)
 
 
 def draw_slots(records: list[dict[str, Any]]) -> int:
@@ -328,7 +407,7 @@ def write_xlsx(path: Path, records: list[dict[str, Any]]) -> None:
             if isinstance(expiry_cell.value, datetime) or hasattr(expiry_cell.value, "year"):
                 expiry_cell.number_format = "yyyy-mm-dd"
 
-    widths = [7, 18, 15, 12, 32, 12, 11, 11, 11, 11, 11, 11, 10, 30]
+    widths = [7, 18, 15, 12, 32, 19, 11, 11, 11, 11, 11, 11, 10, 30]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     for index in range(len(BASE_HEADERS) + 1, len(headers) + 1, 2):
@@ -349,7 +428,8 @@ def write_xlsx(path: Path, records: list[dict[str, Any]]) -> None:
         ("原有抽奖次数合计", summary["total_initial_chances"]),
         ("本次兑换次数合计", summary["total_exchanged"]),
         ("本次实际抽奖合计", summary["total_draws"]),
-        ("未抽完账号", summary["unfinished_accounts"]),
+        ("未完成账号", summary["unfinished_accounts"]),
+        ("仍有剩余次数账号", summary["remaining_accounts"]),
         ("盲盒优惠券种类", summary["coupon_types"]),
         ("盲盒优惠券发放记录", summary["coupon_assignments"]),
         ("生成时间", summary["generated_at"]),
@@ -407,7 +487,7 @@ def build_telegram_summary(records: list[dict[str, Any]]) -> str:
     )
     winners = sum(1 for row in records if isinstance(row.get("prizes"), list) and row["prizes"])
     prize_counts: Counter[str] = Counter()
-    unfinished: list[tuple[str, int]] = []
+    unfinished: list[tuple[str, int, str]] = []
     coupons = coupon_assignments(records)
 
     for row in records:
@@ -419,7 +499,7 @@ def build_telegram_summary(records: list[dict[str, Any]]) -> str:
         remaining = final_remaining(row)
         if is_unfinished(row):
             account = str(row.get("masked_username") or row.get("username") or "未知账号")
-            unfinished.append((account, remaining))
+            unfinished.append((account, remaining, str(row.get("detail") or "").strip()))
 
     prize_total = sum(prize_counts.values())
     success_rate = (succeeded / total * 100) if total else 0.0
@@ -437,7 +517,8 @@ def build_telegram_summary(records: list[dict[str, Any]]) -> str:
         f"  ├── 抽奖结果总数: {prize_total}",
         f"  ├── 盲盒优惠券种类: {len(coupons)}",
         f"  ├── 盲盒优惠券发放: {sum(len(items) for items in coupons.values())}",
-        f"  ├── 未抽完账号: {len(unfinished)}",
+        f"  ├── 未完成账号: {len(unfinished)}",
+        f"  ├── 仍有剩余次数账号: {sum(1 for row in records if final_remaining(row) > 0)}",
         f"  └── 抽奖成功率: {success_rate:.0f}%",
         "🎁 奖品分布",
     ]
@@ -459,10 +540,11 @@ def build_telegram_summary(records: list[dict[str, Any]]) -> str:
         lines.append("  └── 暂无盲盒优惠券记录")
 
     if unfinished:
-        lines.append("⚠️ 未抽完账号")
-        for index, (account, remaining) in enumerate(unfinished):
+        lines.append("⚠️ 未完成账号")
+        for index, (account, remaining, detail) in enumerate(unfinished):
             branch = "└──" if index == len(unfinished) - 1 else "├──"
-            lines.append(f"  {branch} {account}: 最终校验剩余 {remaining} 次")
+            reason = f"最终校验剩余 {remaining} 次" if remaining > 0 else (detail or "执行未完成")
+            lines.append(f"  {branch} {account}: {reason}")
     return "\n".join(lines)
 
 
@@ -571,6 +653,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    args.xlsx = timestamped_xlsx_path(args.xlsx)
     records = load_result_files(args.results_dir)
     write_merged_json(args.merged_json, records)
     write_xlsx(args.xlsx, records)

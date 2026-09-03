@@ -3,11 +3,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from retry_plan import build_retry_matrix, is_slider_failure
+from retry_plan import build_retry_matrix, is_retryable_failure, is_slider_failure
 
 
 class RetryPlanTests(unittest.TestCase):
-    def test_only_failed_slider_accounts_are_retried(self):
+    def test_all_unsuccessful_accounts_are_retried(self):
         rows = [
             {
                 "account_index": 1,
@@ -39,11 +39,20 @@ class RetryPlanTests(unittest.TestCase):
             (root / "result.json").write_text(
                 json.dumps({"results": rows}, ensure_ascii=False), encoding="utf-8"
             )
-            self.assertEqual(build_retry_matrix(root), {"include": [{"index": 1}]})
+            self.assertEqual(
+                build_retry_matrix(root),
+                {"include": [{"index": 1}, {"index": 3}]},
+            )
 
     def test_slider_failure_requires_unsuccessful_result(self):
         self.assertTrue(is_slider_failure({"success": False, "detail": "滑块验证未通过"}))
         self.assertFalse(is_slider_failure({"success": True, "detail": "滑块验证未通过"}))
+
+    def test_retryable_failure_includes_pending_and_partial(self):
+        self.assertTrue(is_retryable_failure({"success": False, "status": "pending"}))
+        self.assertTrue(is_retryable_failure({"success": False, "status": "partial"}))
+        self.assertTrue(is_retryable_failure({"success": False, "status": "failed"}))
+        self.assertFalse(is_retryable_failure({"success": True, "status": "completed"}))
 
 
 if __name__ == "__main__":

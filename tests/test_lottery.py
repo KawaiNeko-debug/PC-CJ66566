@@ -28,11 +28,11 @@ class LotteryParsingTests(unittest.TestCase):
     def test_current_exchange_api_family(self):
         self.assertEqual(
             VOUCHER_DETAIL_PATH,
-            "/api/integral/brand/activity/ns/getVoucherLotteryDetail",
+            "/api/integral/member/day/activity/ns/getVoucherLotteryDetail",
         )
         self.assertEqual(
             EXCHANGE_CHANCE_PATH,
-            "/api/integral/brand/activity/exchangeLotteryChance",
+            "/api/integral/member/day/activity/exchangeLotteryChance",
         )
 
     def test_parse_server_rendered_activity_config(self):
@@ -140,6 +140,9 @@ class LotteryParsingTests(unittest.TestCase):
 
     def test_status_keeps_not_started_as_pending(self):
         self.assertEqual(derive_status("", "活动还未开始", 5), ("pending", False))
+
+    def test_status_treats_ended_activity_as_partial_failure(self):
+        self.assertEqual(derive_status("活动已结束", "", 0), ("partial", False))
 
     def test_status_completed_only_when_no_error_and_empty(self):
         self.assertEqual(derive_status("", "", 0), ("completed", True))

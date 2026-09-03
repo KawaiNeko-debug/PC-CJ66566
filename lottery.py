@@ -41,8 +41,8 @@ PROD_CAS_COOKIE = f"PROD-{BRAND_UPPER}-CAS-SID" if BRAND_UPPER else ""
 GROUP_SESSION_COOKIE = f"{BRAND_UPPER}GROUP_SESSIONID" if BRAND_UPPER else ""
 CUSTOMER_CODE_COOKIE = f"{BRAND_UPPER}_CUSTOMER_CODE" if BRAND_UPPER else ""
 USER_INFO_PATH = "/api/integral/user/getUserInfo"
-VOUCHER_DETAIL_PATH = "/api/integral/brand/activity/ns/getVoucherLotteryDetail"
-EXCHANGE_CHANCE_PATH = "/api/integral/brand/activity/exchangeLotteryChance"
+VOUCHER_DETAIL_PATH = "/api/integral/member/day/activity/ns/getVoucherLotteryDetail"
+EXCHANGE_CHANCE_PATH = "/api/integral/member/day/activity/exchangeLotteryChance"
 LUCKY_COUNT_PATH = "/api/cgi/operationService/front/lottery/getLuckyKeyCount"
 TURN_PATH = "/api/cgi/operationService/front/lottery/turn"
 BLIND_BOX_PATH = "/api/integral/member/day/activity/selectBlindBoxGiftPopup"
@@ -69,7 +69,7 @@ PASSWORD_SELECTORS = (
 AGREEMENT_SELECTORS = ('label .el-checkbox__inner', 'input[type="checkbox"]')
 SUBMIT_SELECTORS = ('#submitLogin', 'button[type="submit"]', 'button.el-button--primary')
 PASSWORD_ERROR_RE = re.compile(r"账号或密码不正确|用户名或密码错误|密码错误|登录失败")
-PENDING_HINT_RE = re.compile(r"活动还未开始|活动未开始|不在活动时间|活动已结束")
+PENDING_HINT_RE = re.compile(r"活动还未开始|活动未开始|不在活动时间")
 INSUFFICIENT_POINTS_RE = re.compile(r"金豆不足|可用金豆不足|积分不足|余额不足")
 ACTIVITY_ACCESS_ID_RE = re.compile(r"activityAccessId\s*:\s*['\"]([A-Fa-f0-9]{32})['\"]")
 LOTTERY_ACTIVITY_ID_RE = re.compile(r"lotteryActivityId\s*:\s*['\"]([A-Za-z0-9_-]+)['\"]")
