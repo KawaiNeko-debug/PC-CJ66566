@@ -7,6 +7,21 @@ on:
         description: 账号组名称
         required: true
         type: string
+      lottery_mode:
+        description: 活动执行模式
+        required: false
+        default: campaign
+        type: string
+      lottery_activity_code:
+        description: 活动代码
+        required: false
+        default: ""
+        type: string
+      lottery_activity_access_id:
+        description: 活动访问标识
+        required: false
+        default: ""
+        type: string
     secrets:
       ACCOUNTS:
         required: true
@@ -68,6 +83,9 @@ jobs:
       BRAND_TOKEN: ${{ secrets.BRAND_TOKEN }}
       HEADLESS: "true"
       RESULT_JSON_PATH: result.json
+      LOTTERY_MODE: ${{ inputs.lottery_mode }}
+      ACTIVITY_ACCESS_ID: ${{ inputs.lottery_activity_access_id }}
+      LOTTERY_ACTIVITY_CODE: ${{ inputs.lottery_activity_code }}
       LOTTERY_EXCHANGE_SAFETY_CAP: "3"
       LOTTERY_DRAW_SAFETY_CAP: "50"
       BROWSER_LAUNCH_TIMEOUT_MS: "120000"
@@ -126,7 +144,7 @@ jobs:
               stream.write(password.strip() + "\n")
               stream.write("__BRAND_PASSWORD__\n")
 
-      - name: 登录并抽完全部次数
+      - name: 登录并执行本组抽奖
         id: run
         continue-on-error: true
         run: python lottery.py --index "$ACCOUNT_INDEX" --output result.json
@@ -184,6 +202,8 @@ jobs:
 
       - id: retry
         name: 筛选所有未成功账号
+        env:
+          RETRY_SLIDER_ONLY: ${{ inputs.lottery_mode == '3d' }}
         run: python retry_plan.py initial-results
 
   retry_lottery:
@@ -202,6 +222,9 @@ jobs:
       BRAND_TOKEN: ${{ secrets.BRAND_TOKEN }}
       HEADLESS: "true"
       RESULT_JSON_PATH: result.json
+      LOTTERY_MODE: ${{ inputs.lottery_mode }}
+      ACTIVITY_ACCESS_ID: ${{ inputs.lottery_activity_access_id }}
+      LOTTERY_ACTIVITY_CODE: ${{ inputs.lottery_activity_code }}
       LOTTERY_EXCHANGE_SAFETY_CAP: "3"
       LOTTERY_DRAW_SAFETY_CAP: "50"
       BROWSER_LAUNCH_TIMEOUT_MS: "120000"

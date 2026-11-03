@@ -1,12 +1,26 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from retry_plan import build_retry_matrix, is_retryable_failure, is_slider_failure
 
 
 class RetryPlanTests(unittest.TestCase):
+    def test_3d_retries_only_slider_failures_without_replaying_draws(self):
+        rows = [
+            {"account_index": 1, "success": False, "detail": "滑块验证未通过"},
+            {"account_index": 2, "success": False, "status": "partial", "draw_count": 1,
+             "remaining_chances": 4, "detail": "最终校验仍剩余 4 次未抽完"},
+            {"account_index": 3, "success": False, "status": "failed", "detail": "请求超时"},
+        ]
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"RETRY_SLIDER_ONLY": "true"}):
+            root = Path(directory)
+            (root / "result.json").write_text(json.dumps({"results": rows}), encoding="utf-8")
+            self.assertEqual(build_retry_matrix(root), {"include": [{"index": 1}]})
+
     def test_all_unsuccessful_accounts_are_retried(self):
         rows = [
             {

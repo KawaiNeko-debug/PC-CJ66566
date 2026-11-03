@@ -1,0 +1,21 @@
+name: 3D抽奖
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    uses: ./.github/workflows/lottery.yml
+    with:
+      group_name: 3d
+      lottery_mode: 3d
+      lottery_activity_code: LAJ3T
+      lottery_activity_access_id: ""
+    secrets:
+      ACCOUNTS: ${{ secrets.ACCOUNTS_3D }}
+      BRAND_TOKEN: ${{ secrets.BRAND_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TG_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.TG_CHAT_ID }}

@@ -24,6 +24,7 @@ def is_retryable_failure(record: dict[str, Any]) -> bool:
 
 def retry_indices(root: Path) -> list[int]:
     indices: set[int] = set()
+    slider_only = os.getenv("RETRY_SLIDER_ONLY", "").strip().lower() == "true"
     for path in sorted(root.rglob("*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -33,7 +34,9 @@ def retry_indices(root: Path) -> list[int]:
         if not isinstance(rows, list):
             continue
         for row in rows:
-            if not isinstance(row, dict) or not is_retryable_failure(row):
+            if not isinstance(row, dict):
+                continue
+            if not (is_slider_failure(row) if slider_only else is_retryable_failure(row)):
                 continue
             index = int(row.get("account_index") or 0)
             if index > 0:

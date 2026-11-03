@@ -13,7 +13,7 @@ def workflow_text(name: str) -> str:
 
 class WorkflowTests(unittest.TestCase):
     def test_all_user_entrypoints_are_manual(self):
-        names = ["lottery-all.yml", "lottery-test.yml", "mall-lottery-all.yml", "mall-lottery-test.yml"]
+        names = ["lottery-all.yml", "lottery-test.yml", "lottery-3d.yml", "mall-lottery-all.yml", "mall-lottery-test.yml"]
         names.extend(f"lottery-group{index}.yml" for index in range(1, 6))
         names.extend(f"mall-lottery-group{index}.yml" for index in range(1, 6))
         for name in names:
@@ -46,6 +46,30 @@ class WorkflowTests(unittest.TestCase):
     def test_group_names_are_distinct(self):
         self.assertTrue(workflow_text("lottery-all.yml").startswith("name: PC普通抽奖组\n"))
         self.assertTrue(workflow_text("mall-lottery-all.yml").startswith("name: 商城抽奖组\n"))
+
+    def test_3d_is_independent_and_passes_its_own_accounts_and_activity(self):
+        text = workflow_text("lottery-3d.yml")
+        self.assertTrue(text.startswith("name: 3D抽奖\n"))
+        self.assertIn("uses: ./.github/workflows/lottery.yml", text)
+        self.assertIn("ACCOUNTS: ${{ secrets.ACCOUNTS_3D }}", text)
+        self.assertIn("lottery_mode: 3d", text)
+        self.assertIn("lottery_activity_code: LAJ3T", text)
+        self.assertNotIn("workflow_call:", text)
+        self.assertNotIn("lottery-3d.yml", workflow_text("lottery-all.yml"))
+        self.assertNotIn("ACCOUNTS_BATCH", text)
+
+    def test_both_initial_and_new_runner_attempts_receive_activity_configuration(self):
+        text = workflow_text("lottery.yml")
+        self.assertEqual(text.count("LOTTERY_MODE: ${{ inputs.lottery_mode }}"), 2)
+        self.assertEqual(text.count("LOTTERY_ACTIVITY_CODE: ${{ inputs.lottery_activity_code }}"), 2)
+        self.assertEqual(text.count("ACTIVITY_ACCESS_ID: ${{ inputs.lottery_activity_access_id }}"), 2)
+        self.assertIn("default: campaign", text)
+        self.assertEqual(text.count('default: ""'), 2)
+        self.assertIn("RETRY_SLIDER_ONLY: ${{ inputs.lottery_mode == '3d' }}", text)
+        for index in range(1, 6):
+            group = workflow_text(f"lottery-group{index}.yml")
+            self.assertNotIn("lottery_mode:", group)
+            self.assertNotIn("lottery_activity_code:", group)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 from dotenv import load_dotenv
@@ -240,6 +241,68 @@ def parse_activity_config(script_texts: list[str]) -> dict[str, str]:
     return config
 
 
+def brand_header_name(suffix: str) -> str:
+    if not BRAND_LOWER:
+        raise LotteryError("BRAND_TOKEN 未配置，无法生成活动请求头")
+    return f"x-{BRAND_LOWER}-{suffix}"
+
+
+def access_token_header_name() -> str:
+    return os.getenv("HEADER_ACCESS_TOKEN", "").strip() or brand_header_name("accesstoken")
+
+
+def is_auth_failure(status: int, payload: Any) -> bool:
+    if status in {401, 403}:
+        return True
+    if isinstance(payload, dict) and str(payload.get("code")) in {"401", "403"}:
+        return True
+    if not isinstance(payload, dict) or payload.get("success") is not False:
+        return False
+    message = response_message(payload, "")
+    return bool(
+        re.search(r"token|令牌|登录失效|登录.*过期|请.*登录|未登录|未授权|认证失败|身份验证|鉴权", message, re.I)
+    )
+
+
+def extract_access_token(headers: Any, storage: Any, header_name: str) -> str:
+    target = header_name.lower()
+    if isinstance(headers, dict):
+        token = next(
+            (str(value).strip() for name, value in headers.items() if str(name).lower() == target),
+            "",
+        )
+        if token:
+            return token
+    if isinstance(storage, str):
+        try:
+            storage = json.loads(storage)
+        except (ValueError, TypeError):
+            return ""
+    if isinstance(storage, dict):
+        for name, value in storage.items():
+            key = re.sub(r"[^a-z]", "", str(name).lower())
+            if key in {"accesstoken", "token", re.sub(r"[^a-z]", "", target)}:
+                if isinstance(value, str) and value.strip():
+                    # Some pages store a JSON object under the token key.
+                    try:
+                        parsed = json.loads(value)
+                    except ValueError:
+                        return value.strip()
+                    if isinstance(parsed, str):
+                        return parsed.strip()
+                    nested = extract_access_token({}, parsed, header_name)
+                    if nested:
+                        return nested
+            nested = extract_access_token({}, value, header_name)
+            if nested:
+                return nested
+    return ""
+
+
+def is_3d_mode() -> bool:
+    return os.getenv("LOTTERY_MODE", "campaign").strip().lower() == "3d"
+
+
 def _first_text(node: dict[str, Any], keys: tuple[str, ...]) -> str:
     for key in keys:
         value = node.get(key)
@@ -414,6 +477,19 @@ def run_draw_exchange_cycle(
         exchange_succeeded,
         exchange_message,
         draw_message,
+    )
+
+
+def run_3d_draw_cycle(client: "CampaignClient", initial_count: int) -> LotteryCycleResult:
+    if initial_count <= 0:
+        return LotteryCycleResult([], 0, 0, 0)
+    succeeded, prizes, message = client.draw_once(1)
+    return LotteryCycleResult(
+        prizes if succeeded else [],
+        max(0, initial_count - (1 if succeeded else 0)),
+        0,
+        0,
+        draw_message="" if succeeded else message,
     )
 
 
@@ -850,7 +926,14 @@ def inject_pc_sso(context: BrowserContext, sso: SSOData) -> None:
 
 
 class CampaignClient:
-    def __init__(self, page: Page, sso: SSOData, secret_holder: dict[str, str]) -> None:
+    def __init__(
+        self,
+        page: Page,
+        sso: SSOData,
+        secret_holder: dict[str, str],
+        access_token_holder: dict[str, str] | None = None,
+        browser_cookies: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.page = page
         self.sso = sso
         self.secret_holder = secret_holder
@@ -861,6 +944,121 @@ class CampaignClient:
         self.activity_access_id = access_override or DEFAULT_ACTIVITY_ACCESS_ID
         self.activity_code = code_override or DEFAULT_ACTIVITY_CODE
         self.activity_name = ""
+
+        self.is_3d = is_3d_mode()
+        if self.is_3d and not os.getenv("LOTTERY_ACTIVITY_CODE", "").strip():
+            self.activity_code = "LAJ3T"
+        self.access_token_holder = access_token_holder if access_token_holder is not None else {}
+        self.api_session = requests.Session()
+        for cookie in browser_cookies or []:
+            if cookie.get("name") and cookie.get("value"):
+                self.api_session.cookies.set(
+                    str(cookie["name"]), str(cookie["value"]), domain=cookie.get("domain")
+                )
+        self.api_origin = f"https://m.{ROOT_DOMAIN}" if self.is_3d else WWW_ORIGIN
+
+    def _storage_values(self) -> dict[str, str]:
+        return self.page.evaluate(
+            """() => {
+                const values = {};
+                for (const storage of [localStorage, sessionStorage]) {
+                    for (let index = 0; index < storage.length; index += 1) {
+                        const key = storage.key(index);
+                        try { values[key] = storage.getItem(key); } catch (_) {}
+                    }
+                }
+                return values;
+            }"""
+        )
+
+    def refresh_access_token(self, force_reload: bool = False) -> str:
+        header_name = access_token_header_name()
+        attempts = max(1, env_int("ACCESS_TOKEN_RETRIES", 5))
+        delay_seconds = max(1, env_int("ACCESS_TOKEN_RETRY_DELAY_SECONDS", 5))
+        rejected_token = self.access_token_holder.get("value", "") if force_reload else ""
+        if force_reload:
+            self.access_token_holder["value"] = ""
+            try:
+                self.page.reload(wait_until="domcontentloaded", timeout=runtime_timeouts()["navigation"])
+                wait_for_network_idle(self.page, runtime_timeouts()["networkidle"], "刷新活动页面")
+            except PlaywrightTimeoutError:
+                pass
+        for attempt in range(attempts):
+            token = self.access_token_holder.get("value", "").strip()
+            if token and token != rejected_token:
+                return token
+            if not token or token == rejected_token:
+                try:
+                    token = extract_access_token({}, self._storage_values(), header_name)
+                except Exception:
+                    token = ""
+                if not token or token == rejected_token:
+                    token = self.access_token_holder.get("value", "").strip()
+                if token and token != rejected_token:
+                    self.access_token_holder["value"] = token
+                    return token
+            if attempt + 1 < attempts:
+                log(f"等待活动会话令牌 {attempt + 1}/{attempts - 1}")
+                self.page.wait_for_timeout(delay_seconds * 1000)
+                try:
+                    self.page.reload(wait_until="domcontentloaded", timeout=runtime_timeouts()["navigation"])
+                    wait_for_network_idle(self.page, runtime_timeouts()["networkidle"], "刷新活动页面")
+                except Exception:
+                    pass
+        return ""
+
+    def _request_3d(self, method: str, path: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+        token = self.refresh_access_token()
+        if not token:
+            raise LotteryError("未能从 SSO 页面会话获取活动访问令牌")
+        url = f"{self.api_origin}{path}"
+        timeout = max(15, env_int("HTTP_TIMEOUT_SECONDS", 90))
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "content-type": "application/json",
+            "origin": self.api_origin,
+            "referer": os.getenv(
+                "LOTTERY_3D_REFERER",
+                "https://servicewechat.com/wx14221813f53bee5d/29/page-frame.html",
+            ),
+            "user-agent": DESKTOP_USER_AGENT,
+            "secretkey": self.secret_holder.get("value") or self.sso.secret_key,
+            access_token_header_name(): token,
+            brand_header_name("clienttype"): "MP-WEIXIN",
+            brand_header_name("mp-version"): os.getenv("LOTTERY_3D_MP_VERSION", "1.2.5"),
+            brand_header_name("mp-appid"): os.getenv("LOTTERY_3D_MP_APPID", "wx14221813f53bee5d"),
+            brand_header_name("mp-env"): os.getenv("LOTTERY_3D_MP_ENV", "release"),
+            "xweb_xhr": "1",
+        }
+        for attempt in range(2):
+            response = self.api_session.request(
+                method.upper(),
+                url,
+                json=payload if method.upper() != "GET" else None,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=False,
+            )
+            try:
+                data = response.json()
+            except ValueError:
+                data = None
+            if is_auth_failure(response.status_code, data):
+                if attempt == 0:
+                    log("活动接口拒绝当前会话，刷新令牌后重试")
+                    token = self.refresh_access_token(force_reload=True)
+                    if not token:
+                        break
+                    headers[access_token_header_name()] = token
+                    headers["secretkey"] = self.secret_holder.get("value") or self.sso.secret_key
+                    continue
+                raise LotteryError("活动接口鉴权失败，刷新会话后仍未通过")
+            if not response.ok:
+                raise LotteryError(f"活动接口 HTTP 失败: {method} {path} HTTP {response.status_code}")
+            if not isinstance(data, dict):
+                raise LotteryError(f"活动接口未返回 JSON: {method} {path}")
+            return data
+        raise LotteryError("活动接口鉴权失败：未能刷新活动访问令牌")
 
     def refresh_activity_config(self) -> None:
         script_texts = self.page.locator("script:not([src])").all_text_contents()
@@ -876,8 +1074,9 @@ class CampaignClient:
 
     def open_and_verify(self) -> dict[str, Any]:
         goto_with_retry(self.page, CAMPAIGN_URL, "打开品牌活动页")
-        self.refresh_activity_config()
-        payload = self.request("GET", USER_INFO_PATH)
+        if not self.is_3d:
+            self.refresh_activity_config()
+        payload = self._request_page("GET", USER_INFO_PATH)
         body = payload.get("body") if isinstance(payload, dict) else None
         code = str(body.get("customerCode") or "").strip().upper() if isinstance(body, dict) else ""
         if code != self.sso.customer_code:
@@ -886,6 +1085,13 @@ class CampaignClient:
         return payload
 
     def request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self.is_3d:
+            return self._request_3d(method, path, payload)
+        return self._request_page(method, path, payload)
+
+    def _request_page(
+        self, method: str, path: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         result = self.page.evaluate(
             """async ({method, path, payload, secretKey}) => {
                 const headers = {
@@ -965,7 +1171,11 @@ class CampaignClient:
         payload = self.request(
             "POST",
             TURN_PATH,
-            {"clientType": "WEB", "activityCode": self.activity_code, "luckyKey": ""},
+            {
+                "clientType": "MP-WEIXIN" if self.is_3d else "WEB",
+                "activityCode": self.activity_code,
+                **({} if self.is_3d else {"luckyKey": ""}),
+            },
         )
         if not api_succeeded(payload):
             message = response_message(payload)
@@ -1042,13 +1252,26 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
             sso = establish_pc_sso(cookies, account)
             inject_pc_sso(context, sso)
             secret_holder = {"value": sso.secret_key}
+            access_token_holder = {"value": ""}
 
             def capture_runtime_secret(request) -> None:
-                if not request.url.startswith(f"{WWW_ORIGIN}/"):
+                try:
+                    headers = request.headers
+                    if request.url.startswith(f"{WWW_ORIGIN}/"):
+                        current = str(headers.get("secretkey") or "").strip()
+                        if current:
+                            secret_holder["value"] = current
+                    hostname = urlsplit(request.url).hostname or ""
+                    if ROOT_DOMAIN and (
+                        hostname == ROOT_DOMAIN or hostname.endswith(f".{ROOT_DOMAIN}")
+                    ):
+                        current_token = extract_access_token(
+                            headers, {}, access_token_header_name()
+                        )
+                        if current_token:
+                            access_token_holder["value"] = current_token
+                except Exception:
                     return
-                current = str(request.headers.get("secretkey") or "").strip()
-                if current:
-                    secret_holder["value"] = current
 
             page.on("request", capture_runtime_secret)
             blind_box_holder: dict[str, Any] = {"payload": None}
@@ -1063,8 +1286,15 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
                 if isinstance(payload, dict):
                     blind_box_holder["payload"] = payload
 
-            page.on("response", capture_blind_box)
-            client = CampaignClient(page, sso, secret_holder)
+            if not is_3d_mode():
+                page.on("response", capture_blind_box)
+            client = CampaignClient(
+                page,
+                sso,
+                secret_holder,
+                access_token_holder,
+                context.cookies(),
+            )
             user_info = client.open_and_verify()
             user_body = user_info.get("body") if isinstance(user_info, dict) else {}
             user_body = user_body if isinstance(user_body, dict) else {}
@@ -1074,48 +1304,69 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
             result["activity_access_id"] = client.activity_access_id
             result["initial_points"] = safe_int(user_body.get("canUseVoucher"), 0)
 
-            try:
-                blind_payload = blind_box_holder.get("payload")
-                if not isinstance(blind_payload, dict):
-                    blind_payload = client.request(
-                        "POST",
-                        BLIND_BOX_PATH,
-                        {"activityAccessId": client.activity_access_id},
+            if not client.is_3d:
+                try:
+                    blind_payload = blind_box_holder.get("payload")
+                    if not isinstance(blind_payload, dict):
+                        blind_payload = client.request(
+                            "POST",
+                            BLIND_BOX_PATH,
+                            {"activityAccessId": client.activity_access_id},
+                        )
+                    if not api_succeeded(blind_payload):
+                        raise LotteryError(
+                            f"盲盒礼包查询失败: {response_message(blind_payload)}"
+                        )
+                    blind_data = blind_payload.get("data")
+                    blind_data = blind_data if isinstance(blind_data, dict) else {}
+                    coupons = parse_blind_box_coupons(blind_payload)
+                    result["blind_box_coupons"] = [asdict(item) for item in coupons]
+                    result["blind_box_can_popup"] = bool(blind_data.get("canPopup"))
+                    result["blind_box_detail"] = (
+                        f"获取 {len(coupons)} 张优惠券"
+                        if coupons
+                        else "未返回优惠券列表（可能已领取）"
                     )
-                if not api_succeeded(blind_payload):
-                    raise LotteryError(
-                        f"盲盒礼包查询失败: {response_message(blind_payload)}"
-                    )
-                blind_data = blind_payload.get("data")
-                blind_data = blind_data if isinstance(blind_data, dict) else {}
-                coupons = parse_blind_box_coupons(blind_payload)
-                result["blind_box_coupons"] = [asdict(item) for item in coupons]
-                result["blind_box_can_popup"] = bool(blind_data.get("canPopup"))
-                result["blind_box_detail"] = (
-                    f"获取 {len(coupons)} 张优惠券"
-                    if coupons
-                    else "未返回优惠券列表（可能已领取）"
-                )
-                if coupons:
-                    log(f"盲盒礼包: {'、'.join(item.name for item in coupons)}")
-                else:
-                    log(result["blind_box_detail"])
-            except Exception as exc:
-                result["blind_box_detail"] = re.sub(r"[\r\n]+", " ", str(exc))[:500]
-                log(f"盲盒礼包记录失败，继续抽奖: {result['blind_box_detail']}")
+                    if coupons:
+                        log(f"盲盒礼包: {'、'.join(item.name for item in coupons)}")
+                    else:
+                        log(result["blind_box_detail"])
+                except Exception as exc:
+                    result["blind_box_detail"] = re.sub(r"[\r\n]+", " ", str(exc))[:500]
+                    log(f"盲盒礼包记录失败，继续抽奖: {result['blind_box_detail']}")
+            else:
+                result["blind_box_detail"] = "3D 模式不查询普通活动盲盒"
+                result["exchange_max"] = 0
+                result["final_points"] = result["initial_points"]
 
             initial_count = client.lucky_count()
-            detail = client.exchange_detail()
-            result.update(
-                {
-                    "initial_chances": initial_count,
-                    "exchange_used_before": detail["exchange_num"],
-                    "exchange_max": detail["exchange_max"],
-                    "exchange_attempted": 0,
-                }
+            result["initial_chances"] = initial_count
+            if client.is_3d:
+                cycle = run_3d_draw_cycle(client, initial_count)
+            else:
+                detail = client.exchange_detail()
+                result.update(
+                    {
+                        "exchange_used_before": detail["exchange_num"],
+                        "exchange_max": detail["exchange_max"],
+                        "exchange_attempted": 0,
+                    }
+                )
+                cycle = run_draw_exchange_cycle(client, initial_count, detail)
+            result["exchange_attempted"] = cycle.exchange_attempted
+            result["exchange_succeeded"] = cycle.exchange_succeeded
+            result["chances_before_draw"] = initial_count + cycle.exchange_succeeded
+            result["prizes"] = [asdict(item) for item in cycle.prizes]
+            result["draw_count"] = max(
+                (item.draw_index for item in cycle.prizes), default=0
             )
-            cycle = run_draw_exchange_cycle(client, initial_count, detail)
-            final_remaining = client.lucky_count()
+            result["remaining_chances"] = cycle.remaining_chances
+            result["unfinished"] = cycle.remaining_chances > 0
+            result["final_chance_check"] = None
+            try:
+                final_remaining = client.lucky_count()
+            except Exception as exc:
+                raise LotteryError(f"最终抽奖次数校验失败: {exc}") from exc
             if final_remaining > 0:
                 final_message = f"最终校验仍剩余 {final_remaining} 次未抽完"
                 cycle.draw_message = "；".join(
@@ -1125,23 +1376,17 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
             else:
                 log("最终校验通过: 剩余抽奖次数为 0")
 
-            result["exchange_attempted"] = cycle.exchange_attempted
-            result["exchange_succeeded"] = cycle.exchange_succeeded
-            result["chances_before_draw"] = initial_count + cycle.exchange_succeeded
-            result["prizes"] = [asdict(item) for item in cycle.prizes]
-            result["draw_count"] = max(
-                (item.draw_index for item in cycle.prizes), default=0
-            )
             result["remaining_chances"] = final_remaining
             result["final_chance_check"] = final_remaining
             result["unfinished"] = final_remaining > 0
 
-            final_info = client.request("GET", USER_INFO_PATH)
-            final_body = final_info.get("body") if isinstance(final_info, dict) else {}
-            result["final_points"] = safe_int(
-                final_body.get("canUseVoucher") if isinstance(final_body, dict) else None,
-                result["initial_points"],
-            )
+            if not client.is_3d:
+                final_info = client.request("GET", USER_INFO_PATH)
+                final_body = final_info.get("body") if isinstance(final_info, dict) else {}
+                result["final_points"] = safe_int(
+                    final_body.get("canUseVoucher") if isinstance(final_body, dict) else None,
+                    result["initial_points"],
+                )
             messages = [
                 item for item in (cycle.exchange_message, cycle.draw_message) if item
             ]
@@ -1165,10 +1410,10 @@ def write_result(path: Path, result: dict[str, Any]) -> None:
         "generated_at": utc8_now().strftime("%Y-%m-%d %H:%M:%S"),
         "activity_code": result.get("activity_code")
         or os.getenv("LOTTERY_ACTIVITY_CODE", "").strip()
-        or DEFAULT_ACTIVITY_CODE,
+        or ("LAJ3T" if is_3d_mode() else DEFAULT_ACTIVITY_CODE),
         "activity_access_id": result.get("activity_access_id")
         or os.getenv("ACTIVITY_ACCESS_ID", "").strip()
-        or DEFAULT_ACTIVITY_ACCESS_ID,
+        or ("" if is_3d_mode() else DEFAULT_ACTIVITY_ACCESS_ID),
         "results": [result],
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
