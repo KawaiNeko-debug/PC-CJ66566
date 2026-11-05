@@ -74,7 +74,9 @@ def merge_account_attempts(attempts: list[dict[str, Any]]) -> dict[str, Any]:
     latest = dict(ordered[-1])
     earliest = ordered[0]
     latest["initial_points"] = int(earliest.get("initial_points") or 0)
-    latest["initial_chances"] = int(earliest.get("initial_chances") or 0)
+    latest["initial_chances"] = (
+        None if earliest.get("chance_check_skipped") else int(earliest.get("initial_chances") or 0)
+    )
     latest["exchange_attempted"] = sum(
         int(row.get("exchange_attempted") or 0) for row in ordered
     )
@@ -218,6 +220,7 @@ def summary_payload(records: list[dict[str, Any]]) -> dict[str, Any]:
         "total_draws": sum(int(row.get("draw_count") or 0) for row in records),
         "unfinished_accounts": sum(1 for row in records if is_unfinished(row)),
         "remaining_accounts": sum(1 for row in records if final_remaining(row) > 0),
+        "chance_check_skipped_accounts": sum(1 for row in records if row.get("chance_check_skipped")),
         "coupon_types": len(coupons),
         "coupon_assignments": sum(len(accounts) for accounts in coupons.values()),
         "results": records,
@@ -320,10 +323,10 @@ def row_values(record: dict[str, Any], slot_count: int) -> list[Any]:
         first_draw_time(record),
         int(record.get("initial_points") or 0),
         int(record.get("final_points") or 0),
-        int(record.get("initial_chances") or 0),
+        "未查询" if record.get("chance_check_skipped") else int(record.get("initial_chances") or 0),
         int(record.get("exchange_succeeded") or 0),
         int(record.get("draw_count") or 0),
-        final_remaining(record),
+        "未查询" if record.get("chance_check_skipped") else final_remaining(record),
         "是" if is_unfinished(record) else "否",
         coupon_text(record),
     ]
@@ -425,11 +428,11 @@ def write_xlsx(path: Path, records: list[dict[str, Any]]) -> None:
         ("已完成账号", summary["completed_accounts"]),
         ("活动未开始/待处理", summary["pending_accounts"]),
         ("失败或部分完成", summary["failed_accounts"]),
-        ("原有抽奖次数合计", summary["total_initial_chances"]),
+        ("原有抽奖次数合计", "未查询" if summary["chance_check_skipped_accounts"] else summary["total_initial_chances"]),
         ("本次兑换次数合计", summary["total_exchanged"]),
         ("本次实际抽奖合计", summary["total_draws"]),
         ("未完成账号", summary["unfinished_accounts"]),
-        ("仍有剩余次数账号", summary["remaining_accounts"]),
+        ("仍有剩余次数账号", "未查询" if summary["chance_check_skipped_accounts"] else summary["remaining_accounts"]),
         ("盲盒优惠券种类", summary["coupon_types"]),
         ("盲盒优惠券发放记录", summary["coupon_assignments"]),
         ("生成时间", summary["generated_at"]),
@@ -518,7 +521,11 @@ def build_telegram_summary(records: list[dict[str, Any]]) -> str:
         f"  ├── 盲盒优惠券种类: {len(coupons)}",
         f"  ├── 盲盒优惠券发放: {sum(len(items) for items in coupons.values())}",
         f"  ├── 未完成账号: {len(unfinished)}",
-        f"  ├── 仍有剩余次数账号: {sum(1 for row in records if final_remaining(row) > 0)}",
+        (
+            "  ├── 剩余次数: 未查询（单次抽奖模式）"
+            if any(row.get("chance_check_skipped") for row in records)
+            else f"  ├── 仍有剩余次数账号: {sum(1 for row in records if final_remaining(row) > 0)}"
+        ),
         f"  └── 抽奖成功率: {success_rate:.0f}%",
         "🎁 奖品分布",
     ]

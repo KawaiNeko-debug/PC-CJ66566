@@ -55,6 +55,10 @@ DESKTOP_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/138.0.0.0 Safari/537.36"
 )
+MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36"
+)
 ACCOUNT_SELECTORS = (
     'input[placeholder*="手机号"]',
     'input[placeholder*="账号"]',
@@ -480,17 +484,35 @@ def run_draw_exchange_cycle(
     )
 
 
-def run_3d_draw_cycle(client: "CampaignClient", initial_count: int) -> LotteryCycleResult:
-    if initial_count <= 0:
-        return LotteryCycleResult([], 0, 0, 0)
+def execute_mobile_draw(client: "CampaignClient", result: dict[str, Any]) -> None:
+    result.update({
+        "initial_chances": None,
+        "chances_before_draw": None,
+        "remaining_chances": None,
+        "final_chance_check": None,
+        "chance_check_skipped": True,
+        "exchange_max": 0,
+        "blind_box_detail": "3D 模式不查询普通活动盲盒",
+    })
+    if env_bool("TOKEN_CHECK_ONLY"):
+        count = client.lucky_count()
+        result.update({
+            "success": True, "status": "completed",
+            "detail": "移动端直接登录和次数查询验证通过（只读，不抽奖）",
+            "initial_chances": count, "remaining_chances": count,
+            "final_chance_check": count, "chance_check_skipped": False,
+        })
+        log("移动端直接登录验证通过；只读测试结束，未提交抽奖")
+        return
+    log("3D 模式跳过次数查询，直接提交一次抽奖")
     succeeded, prizes, message = client.draw_once(1)
-    return LotteryCycleResult(
-        prizes if succeeded else [],
-        max(0, initial_count - (1 if succeeded else 0)),
-        0,
-        0,
-        draw_message="" if succeeded else message,
-    )
+    result.update({
+        "prizes": [asdict(item) for item in prizes] if succeeded else [],
+        "draw_count": 1 if succeeded else 0,
+        "success": succeeded,
+        "status": "completed" if succeeded else "failed",
+        "detail": "已完成一次抽奖（未查询剩余次数）" if succeeded else message or "抽奖未成功",
+    })
 
 
 def runtime_timeouts() -> dict[str, int]:
@@ -825,6 +847,110 @@ def login_passport(page: Page, context: BrowserContext, account: str, password: 
     )
 
 
+def login_mobile(page: Page, account: str, password: str) -> str:
+    """Use the original two-step mobile form and capture its mobile session token."""
+    mobile_origin = f"https://m.{ROOT_DOMAIN}"
+    token_holder = {"value": ""}
+    identity_holder = {"value": ""}
+
+    def capture_request(request) -> None:
+        if urlsplit(request.url).hostname != urlsplit(mobile_origin).hostname:
+            return
+        token = extract_access_token(request.headers, {}, access_token_header_name())
+        if token and token.lower() not in {"none", "null", "undefined"}:
+            token_holder["value"] = token
+
+    def capture_response(response) -> None:
+        url = urlsplit(response.url)
+        if url.hostname != urlsplit(mobile_origin).hostname or url.path != "/api/login/login-by-code":
+            return
+        try:
+            payload = response.json()
+            if not api_succeeded(payload):
+                return
+            data = payload.get("data") or {}
+            token = extract_access_token({}, data, access_token_header_name())
+            if token and token.lower() not in {"none", "null", "undefined"}:
+                token_holder["value"] = token
+                identity_holder["value"] = str(data.get("customerCode") or "").strip().upper()
+        except Exception:
+            return
+
+    page.on("request", capture_request)
+    page.on("response", capture_response)
+    try:
+        timeouts = runtime_timeouts()
+        redirect = requests.utils.quote(f"{mobile_origin}/", safe="")
+        goto_with_retry(page, f"{PASSPORT_ORIGIN}/mobile/login?redirect={redirect}", "打开移动端登录页")
+        account_input = visible_locator(
+            page, ('input[placeholder*="手机号码"]', 'input[placeholder*="邮箱"]', *ACCOUNT_SELECTORS),
+            timeouts["component"], "移动端账号输入框",
+        )
+        if account_input is None:
+            raise LotteryError("移动端账号输入框加载超时")
+        account_input.fill(account)
+        agreement = visible_locator(page, (
+            ".consent-agreement img:nth-child(2)", *AGREEMENT_SELECTORS,
+        ), min(10_000, timeouts["component"]), "移动端同意协议")
+        if agreement is not None:
+            if agreement.get_attribute("type") == "checkbox":
+                agreement.check(force=True)
+            else:
+                agreement.click(timeout=5_000)
+        first_submit = visible_locator(page, (
+            "#__layout > div > div > div > div:nth-child(3) > form > button",
+            'button:has-text("下一步")', 'form button',
+        ), timeouts["component"], "移动端第一步登录按钮")
+        if first_submit is None:
+            raise LotteryError("移动端第一步登录按钮加载超时")
+        first_submit.click(timeout=30_000)
+        password_input = visible_locator(page, PASSWORD_SELECTORS, timeouts["component"], "移动端密码输入框")
+        if password_input is None:
+            raise LotteryError("移动端密码输入框加载超时")
+        password_input.fill(password)
+        submit = visible_locator(page, (
+            "#__layout > div > div > div > div:nth-child(2) > div:nth-child(2) > form > button",
+            'form button[type="submit"]', 'form button',
+        ), timeouts["component"], "移动端最终登录按钮")
+        if submit is None:
+            raise LotteryError("移动端最终登录按钮加载超时")
+        submit.click(timeout=30_000)
+        log("已提交移动端登录表单，等待首页、token 或滑块")
+        timeout = max(60, env_int("LOGIN_TIMEOUT_SECONDS", 240 if env_bool("GITHUB_ACTIONS") else 180))
+        deadline = time.time() + timeout
+        next_log = time.time() + 15
+        while time.time() < deadline:
+            if detect_password_error(page):
+                raise LotteryError("账号或密码错误")
+            if _slider_is_visible(page.locator("#aliyunCaptcha-sliding-slider")):
+                solve_slider(page, max_attempts=max(1, env_int("SLIDER_MAX_ATTEMPTS", 8)))
+                continue
+            on_mobile = urlsplit(page.url).hostname == urlsplit(mobile_origin).hostname
+            if on_mobile:
+                if not token_holder["value"]:
+                    try:
+                        storage = page.evaluate("() => Object.assign({}, localStorage, sessionStorage)")
+                        token_holder["value"] = extract_access_token({}, storage, access_token_header_name())
+                    except Exception:
+                        pass
+                if token_holder["value"].lower() in {"none", "null", "undefined"}:
+                    token_holder["value"] = ""
+                if token_holder["value"]:
+                    identity = identity_holder["value"]
+                    if identity and identity != account.strip().upper():
+                        raise LotteryError("移动端登录返回的客编不一致")
+                    log("移动端直接登录成功，已取得移动 API token")
+                    return token_holder["value"]
+            if time.time() >= next_log:
+                log(f"等待移动端登录完成，最多再等待 {max(0, int(deadline - time.time()))}s")
+                next_log = time.time() + 15
+            page.wait_for_timeout(1_000)
+        raise LotteryError(f"移动端登录超时（{timeout}s），未取得移动 API token")
+    finally:
+        page.remove_listener("request", capture_request)
+        page.remove_listener("response", capture_response)
+
+
 def _browser_headers(origin: str, referer: str) -> dict[str, str]:
     return {
         "Accept": "application/json, text/plain, */*",
@@ -912,76 +1038,6 @@ def establish_pc_sso(cookies: dict[str, str], account: str) -> SSOData:
 
     log("PC SSO 会话建立成功")
     return SSOData(customer_code, prod_sid, group_session_id, secret_key)
-
-
-def establish_mobile_access_token(cookies: dict[str, str], account: str) -> str:
-    """Exchange the SSO ticket for the mobile API token used by the mini-program API."""
-    tgc = cookies.get("tgc", "").strip()
-    prod_sid = cookies.get(PROD_CAS_COOKIE, "").strip()
-    if not tgc or not prod_sid:
-        raise LotteryError("Passport Cookie 不完整，无法申请移动端 token")
-
-    mobile_origin = f"https://m.{ROOT_DOMAIN}"
-    mobile_app_id = os.getenv("LOTTERY_3D_MOBILE_APP_ID", "").strip() or f"{BRAND_UPPER}_MOBILE_APP"
-    timeout = max(
-        15,
-        env_int("HTTP_TIMEOUT_SECONDS", 90 if env_bool("GITHUB_ACTIONS", False) else 45),
-    )
-    session = requests.Session()
-    check_headers = _browser_headers(mobile_origin, f"{mobile_origin}/")
-    check_response = session.post(
-        CHECK_LOGIN_URL,
-        json={"appId": mobile_app_id},
-        headers=check_headers,
-        cookies={"tgc": tgc, PROD_CAS_COOKIE: prod_sid},
-        timeout=timeout,
-    )
-    check_response.raise_for_status()
-    check_payload = check_response.json()
-    check_data = check_payload.get("data") if isinstance(check_payload, dict) else None
-    customer_code = str(check_data.get("customerCode") or "").strip().upper() if isinstance(check_data, dict) else ""
-    auth_code = str(check_data.get("code") or "").strip() if isinstance(check_data, dict) else ""
-    if (
-        not api_succeeded(check_payload)
-        or not isinstance(check_data, dict)
-        or not check_data.get("isLogin")
-        or not auth_code
-        or not customer_code
-    ):
-        raise LotteryError("移动端 check-login 未返回有效登录 code")
-    if customer_code != account.strip().upper():
-        raise LotteryError("移动端登录客编不一致")
-
-    login_headers = _browser_headers(mobile_origin, f"{mobile_origin}/")
-    login_headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 15; Pixel 9) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/149.0.0.0 Mobile Safari/537.36"
-            ),
-            brand_header_name("clienttype"): "WEB",
-            access_token_header_name(): "NONE",
-        }
-    )
-    response = session.post(
-        f"{mobile_origin}/api/login/login-by-code",
-        files={"code": (None, auth_code)},
-        headers=login_headers,
-        cookies={"tgc": tgc, PROD_CAS_COOKIE: prod_sid},
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    data = payload.get("data") if isinstance(payload, dict) else None
-    token = str(data.get("accessToken") or "").strip() if isinstance(data, dict) else ""
-    returned_code = str(data.get("customerCode") or "").strip().upper() if isinstance(data, dict) else ""
-    if not api_succeeded(payload) or not token:
-        raise LotteryError("移动端 login-by-code 未返回 access token")
-    if returned_code and returned_code != customer_code:
-        raise LotteryError("移动端 token 客编校验不一致")
-    log("移动端 API token 获取成功")
-    return token
 
 
 def inject_pc_sso(context: BrowserContext, sso: SSOData) -> None:
@@ -1105,7 +1161,7 @@ class CampaignClient:
     def _request_3d(self, method: str, path: str, payload: dict[str, Any] | None) -> dict[str, Any]:
         token = self.refresh_access_token()
         if not token:
-            raise LotteryError("未能从 SSO 页面会话获取活动访问令牌")
+            raise LotteryError("未能从移动端页面会话获取活动访问令牌")
         url = f"{self.api_origin}{path}"
         timeout = max(15, env_int("HTTP_TIMEOUT_SECONDS", 90))
         headers = {
@@ -1116,7 +1172,7 @@ class CampaignClient:
                 "LOTTERY_3D_REFERER",
                 "https://servicewechat.com/wx14221813f53bee5d/29/page-frame.html",
             ),
-            "user-agent": DESKTOP_USER_AGENT,
+            "user-agent": MOBILE_USER_AGENT,
             "secretkey": os.getenv("LOTTERY_3D_SECRET_KEY", "").strip() or "defaultKeyId".encode().hex(),
             access_token_header_name(): token,
             brand_header_name("clienttype"): "MP-WEIXIN",
@@ -1326,6 +1382,13 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
     if env_bool("TOKEN_CHECK_ONLY") and not is_3d_mode():
         raise LotteryError("移动 token 只读验证仅支持 3D 模式")
     headless = env_bool("HEADLESS", True)
+    mobile_mode = is_3d_mode()
+    if mobile_mode:
+        result.update({
+            "initial_chances": None, "remaining_chances": None,
+            "final_chance_check": None, "chance_check_skipped": True,
+            "exchange_max": 0,
+        })
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             headless=headless,
@@ -1333,8 +1396,10 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
             args=["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"],
         )
         context = browser.new_context(
-            user_agent=DESKTOP_USER_AGENT,
-            viewport={"width": 1365, "height": 900},
+            user_agent=MOBILE_USER_AGENT if mobile_mode else DESKTOP_USER_AGENT,
+            viewport={"width": 430, "height": 932} if mobile_mode else {"width": 1365, "height": 900},
+            is_mobile=mobile_mode,
+            has_touch=mobile_mode,
             locale="zh-CN",
             timezone_id="Asia/Shanghai",
         )
@@ -1355,14 +1420,24 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
         page.set_default_timeout(timeouts["component"])
         page.set_default_navigation_timeout(timeouts["navigation"])
         try:
+            if mobile_mode:
+                token = login_mobile(page, account, password)
+                client = CampaignClient(
+                    page, SSOData(account.strip().upper(), "", "", ""), {"value": ""},
+                    {"value": token}, context.cookies(),
+                    lambda: login_mobile(page, account, password),
+                )
+                result.update({
+                    "customer_code": account.strip().upper(),
+                    "activity_name": "3D抽奖", "activity_code": client.activity_code,
+                    "activity_access_id": "",
+                })
+                execute_mobile_draw(client, result)
+                return result
             cookies = login_passport(page, context, account, password)
             sso = establish_pc_sso(cookies, account)
             inject_pc_sso(context, sso)
             secret_holder = {"value": sso.secret_key}
-            mobile_mode = is_3d_mode()
-
-            def mobile_token_refresh() -> str:
-                return establish_mobile_access_token(cookies, account)
 
             access_token_holder = {"value": ""}
 
@@ -1406,7 +1481,6 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
                 secret_holder,
                 access_token_holder,
                 context.cookies(),
-                mobile_token_refresh if mobile_mode else None,
             )
             user_info = client.open_and_verify()
             user_body = user_info.get("body") if isinstance(user_info, dict) else {}
@@ -1417,69 +1491,46 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
             result["activity_access_id"] = client.activity_access_id
             result["initial_points"] = safe_int(user_body.get("canUseVoucher"), 0)
 
-            if client.is_3d and env_bool("TOKEN_CHECK_ONLY"):
-                count = client.lucky_count()
-                result.update({
-                    "success": True,
-                    "status": "completed",
-                    "detail": "移动 token 和 3D 次数查询验证通过（只读，不抽奖）",
-                    "initial_chances": count,
-                    "remaining_chances": count,
-                    "final_chance_check": count,
-                    "exchange_max": 0,
-                })
-                log("移动 token 和 3D 次数查询验证通过；只读测试结束，未提交抽奖")
-                return result
-
-            if not client.is_3d:
-                try:
-                    blind_payload = blind_box_holder.get("payload")
-                    if not isinstance(blind_payload, dict):
-                        blind_payload = client.request(
-                            "POST",
-                            BLIND_BOX_PATH,
-                            {"activityAccessId": client.activity_access_id},
-                        )
-                    if not api_succeeded(blind_payload):
-                        raise LotteryError(
-                            f"盲盒礼包查询失败: {response_message(blind_payload)}"
-                        )
-                    blind_data = blind_payload.get("data")
-                    blind_data = blind_data if isinstance(blind_data, dict) else {}
-                    coupons = parse_blind_box_coupons(blind_payload)
-                    result["blind_box_coupons"] = [asdict(item) for item in coupons]
-                    result["blind_box_can_popup"] = bool(blind_data.get("canPopup"))
-                    result["blind_box_detail"] = (
-                        f"获取 {len(coupons)} 张优惠券"
-                        if coupons
-                        else "未返回优惠券列表（可能已领取）"
+            try:
+                blind_payload = blind_box_holder.get("payload")
+                if not isinstance(blind_payload, dict):
+                    blind_payload = client.request(
+                        "POST",
+                        BLIND_BOX_PATH,
+                        {"activityAccessId": client.activity_access_id},
                     )
-                    if coupons:
-                        log(f"盲盒礼包: {'、'.join(item.name for item in coupons)}")
-                    else:
-                        log(result["blind_box_detail"])
-                except Exception as exc:
-                    result["blind_box_detail"] = re.sub(r"[\r\n]+", " ", str(exc))[:500]
-                    log(f"盲盒礼包记录失败，继续抽奖: {result['blind_box_detail']}")
-            else:
-                result["blind_box_detail"] = "3D 模式不查询普通活动盲盒"
-                result["exchange_max"] = 0
-                result["final_points"] = result["initial_points"]
-
+                if not api_succeeded(blind_payload):
+                    raise LotteryError(
+                        f"盲盒礼包查询失败: {response_message(blind_payload)}"
+                    )
+                blind_data = blind_payload.get("data")
+                blind_data = blind_data if isinstance(blind_data, dict) else {}
+                coupons = parse_blind_box_coupons(blind_payload)
+                result["blind_box_coupons"] = [asdict(item) for item in coupons]
+                result["blind_box_can_popup"] = bool(blind_data.get("canPopup"))
+                result["blind_box_detail"] = (
+                    f"获取 {len(coupons)} 张优惠券"
+                    if coupons
+                    else "未返回优惠券列表（可能已领取）"
+                )
+                if coupons:
+                    log(f"盲盒礼包: {'、'.join(item.name for item in coupons)}")
+                else:
+                    log(result["blind_box_detail"])
+            except Exception as exc:
+                result["blind_box_detail"] = re.sub(r"[\r\n]+", " ", str(exc))[:500]
+                log(f"盲盒礼包记录失败，继续抽奖: {result['blind_box_detail']}")
             initial_count = client.lucky_count()
             result["initial_chances"] = initial_count
-            if client.is_3d:
-                cycle = run_3d_draw_cycle(client, initial_count)
-            else:
-                detail = client.exchange_detail()
-                result.update(
-                    {
-                        "exchange_used_before": detail["exchange_num"],
-                        "exchange_max": detail["exchange_max"],
-                        "exchange_attempted": 0,
-                    }
-                )
-                cycle = run_draw_exchange_cycle(client, initial_count, detail)
+            detail = client.exchange_detail()
+            result.update(
+                {
+                    "exchange_used_before": detail["exchange_num"],
+                    "exchange_max": detail["exchange_max"],
+                    "exchange_attempted": 0,
+                }
+            )
+            cycle = run_draw_exchange_cycle(client, initial_count, detail)
             result["exchange_attempted"] = cycle.exchange_attempted
             result["exchange_succeeded"] = cycle.exchange_succeeded
             result["chances_before_draw"] = initial_count + cycle.exchange_succeeded

@@ -15,10 +15,42 @@ from report import (
     timestamped_xlsx_path,
     write_merged_json,
     write_xlsx,
+    merge_account_attempts,
+    row_values,
 )
 
 
 class ReportTests(unittest.TestCase):
+    def test_single_mobile_draw_keeps_unknown_counts_in_report(self):
+        from lottery import PrizeRecord, execute_mobile_draw, result_template
+        client = Mock()
+        client.draw_once.return_value = (True, [PrizeRecord(1, "5金豆")], "")
+        record = result_template("A001", 1)
+        with patch.dict("os.environ", {"TOKEN_CHECK_ONLY": "false"}):
+            execute_mobile_draw(client, record)
+        merged = merge_account_attempts([record])
+        self.assertIsNone(merged["initial_chances"])
+        self.assertIsNone(merged["final_chance_check"])
+        values = row_values(merged, 1)
+        self.assertEqual(values[8], "未查询")
+        self.assertEqual(values[10], 1)
+        self.assertEqual(values[11], "未查询")
+        self.assertEqual(values[12], "否")
+        message = build_telegram_summary([merged])
+        self.assertIn("抽奖成功: 1/1", message)
+        self.assertIn("剩余次数: 未查询", message)
+        self.assertNotIn("仍有剩余次数账号: 0", message)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mobile.xlsx"
+            write_xlsx(path, [merged])
+            workbook = load_workbook(path)
+            self.assertEqual(workbook.worksheets[0].cell(2, 9).value, "未查询")
+            self.assertEqual(workbook.worksheets[0].cell(2, 12).value, "未查询")
+            stats = dict(workbook["统计"].values)
+            self.assertEqual(stats["原有抽奖次数合计"], "未查询")
+            self.assertEqual(stats["仍有剩余次数账号"], "未查询")
+            workbook.close()
+
     def test_timestamped_xlsx_path_includes_date_hour_and_minute(self):
         now = datetime(2026, 9, 3, 1, 26, tzinfo=timezone(timedelta(hours=8)))
         self.assertEqual(
