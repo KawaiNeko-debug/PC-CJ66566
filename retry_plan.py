@@ -22,9 +22,18 @@ def is_retryable_failure(record: dict[str, Any]) -> bool:
     return not bool(record.get("success")) or str(record.get("status") or "") != "completed"
 
 
-def retry_indices(root: Path) -> list[int]:
+def is_mobile_retryable(record: dict[str, Any]) -> bool:
+    # A confirmed draw must not be replayed, including a cleanup/check failure afterwards.
+    if record.get("success") or record.get("draw_count") or record.get("prizes"):
+        return False
+    return is_retryable_failure(record)
+
+
+def retry_indices(root: Path, expected: list[int] | None = None) -> list[int]:
     indices: set[int] = set()
+    seen: set[int] = set()
     slider_only = os.getenv("RETRY_SLIDER_ONLY", "").strip().lower() == "true"
+    mobile = os.getenv("RETRY_MODE", "").strip().lower() == "3d"
     for path in sorted(root.rglob("*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -36,16 +45,20 @@ def retry_indices(root: Path) -> list[int]:
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            if not (is_slider_failure(row) if slider_only else is_retryable_failure(row)):
-                continue
             index = int(row.get("account_index") or 0)
             if index > 0:
-                indices.add(index)
+                seen.add(index)
+                retryable = is_mobile_retryable(row) if mobile else (
+                    is_slider_failure(row) if slider_only else is_retryable_failure(row)
+                )
+                if retryable:
+                    indices.add(index)
+    indices.update(set(expected or []) - seen)
     return sorted(indices)
 
 
-def build_retry_matrix(root: Path) -> dict[str, list[dict[str, int]]]:
-    return {"include": [{"index": index} for index in retry_indices(root)]}
+def build_retry_matrix(root: Path, expected: list[int] | None = None) -> dict[str, list[dict[str, int]]]:
+    return {"include": [{"index": index} for index in retry_indices(root, expected)]}
 
 
 def main() -> int:
@@ -54,7 +67,9 @@ def main() -> int:
     parser.add_argument("--github-output", default=os.getenv("GITHUB_OUTPUT", ""))
     args = parser.parse_args()
 
-    matrix = build_retry_matrix(args.root)
+    expected_matrix = json.loads(os.getenv("EXPECTED_MATRIX", '{"include":[]}'))
+    expected = [int(item["index"]) for item in expected_matrix["include"]]
+    matrix = build_retry_matrix(args.root, expected)
     has_retry = bool(matrix["include"])
     output_lines = [
         "matrix=" + json.dumps(matrix, ensure_ascii=False, separators=(",", ":")),

@@ -88,11 +88,22 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(text.count("ACTIVITY_ACCESS_ID: ${{ inputs.lottery_activity_access_id }}"), 2)
         self.assertIn("default: campaign", text)
         self.assertEqual(text.count('default: ""'), 2)
-        self.assertIn("RETRY_SLIDER_ONLY: ${{ inputs.lottery_mode == '3d' }}", text)
+        self.assertIn("RETRY_MODE: ${{ inputs.lottery_mode }}", text)
+        self.assertIn("EXPECTED_MATRIX: ${{ needs.prepare.outputs.matrix }}", text)
         for index in range(1, 6):
             group = workflow_text(f"lottery-group{index}.yml")
             self.assertNotIn("lottery_mode:", group)
             self.assertNotIn("lottery_activity_code:", group)
+
+    def test_account_deadline_does_not_cancel_result_upload_or_retry(self):
+        text = workflow_text("lottery.yml")
+        self.assertEqual(text.count('python account_runner.py --index "$ACCOUNT_INDEX" --output result.json --timeout-seconds 300'), 2)
+        self.assertEqual(text.count("timeout-minutes: 6"), 2)
+        self.assertEqual(text.count("timeout-minutes: 10"), 2)
+        self.assertIn("  verify_results:", text)
+        report = text.split("  report:\n", 1)[1].split("  verify_results:\n", 1)[0]
+        self.assertIn("生成 JSON 和 XLSX 汇总", report)
+        self.assertNotIn("raise SystemExit(1)", report)
 
 
 if __name__ == "__main__":

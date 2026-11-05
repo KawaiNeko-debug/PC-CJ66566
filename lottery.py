@@ -1577,6 +1577,9 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
             log(f"账号 {mask_account(account)} 执行失败: {result['detail']}")
         finally:
             result["completed_at"] = utc8_now().strftime("%Y-%m-%d %H:%M:%S")
+            checkpoint = os.getenv("LOTTERY_CHECKPOINT_PATH", "").strip()
+            if checkpoint:
+                write_result(Path(checkpoint), result)
             context.close()
             browser.close()
     return result
@@ -1594,7 +1597,9 @@ def write_result(path: Path, result: dict[str, Any]) -> None:
         or ("" if is_3d_mode() else DEFAULT_ACTIVITY_ACCESS_ID),
         "results": [result],
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
     log(f"结果已写入 {path}")
 
 

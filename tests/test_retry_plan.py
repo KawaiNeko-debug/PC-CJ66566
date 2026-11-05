@@ -9,6 +9,21 @@ from retry_plan import build_retry_matrix, is_retryable_failure, is_slider_failu
 
 
 class RetryPlanTests(unittest.TestCase):
+    def test_mobile_timeouts_and_missing_results_get_fresh_runners(self):
+        rows = [
+            {"account_index": 1, "success": False, "detail": "移动端登录超时（300s）"},
+            {"account_index": 2, "success": False, "timed_out": True},
+            {"account_index": 3, "success": True, "draw_count": 1},
+            {"account_index": 4, "success": False, "draw_count": 1, "prizes": [{"title": "5金豆"}]},
+            {"account_index": 5, "success": False, "detail": "脚本未生成 result.json"},
+        ]
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"RETRY_MODE": "3d"}):
+            root = Path(directory)
+            (root / "result.json").write_text(json.dumps({"results": rows}), encoding="utf-8")
+            self.assertEqual(build_retry_matrix(root, [1, 2, 3, 4, 5, 6]), {
+                "include": [{"index": 1}, {"index": 2}, {"index": 5}, {"index": 6}],
+            })
+
     def test_3d_retries_only_slider_failures_without_replaying_draws(self):
         rows = [
             {"account_index": 1, "success": False, "detail": "滑块验证未通过"},
