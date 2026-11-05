@@ -196,16 +196,6 @@ jobs:
           path: result.json
           retention-days: 14
 
-      - name: 校验只读测试结果
-        if: inputs.token_check_only
-        shell: python
-        run: |
-          import json
-          from pathlib import Path
-
-          payload = json.loads(Path("result.json").read_text(encoding="utf-8"))
-          raise SystemExit(0 if all(row.get("success") for row in payload["results"]) else 1)
-
   prepare_retry:
     needs: [prepare, lottery]
     if: always() && needs.prepare.result == 'success'
@@ -351,16 +341,6 @@ jobs:
           path: result.json
           retention-days: 14
 
-      - name: 校验只读重试结果
-        if: inputs.token_check_only
-        shell: python
-        run: |
-          import json
-          from pathlib import Path
-
-          payload = json.loads(Path("result.json").read_text(encoding="utf-8"))
-          raise SystemExit(0 if all(row.get("success") for row in payload["results"]) else 1)
-
   report:
     needs: [prepare, lottery, prepare_retry, retry_lottery]
     if: always() && needs.prepare.result == 'success' && !inputs.token_check_only
@@ -402,17 +382,19 @@ jobs:
           retention-days: 30
 
   verify_results:
-    needs: report
-    if: always() && inputs.lottery_mode == '3d' && !inputs.token_check_only && needs.report.result == 'success'
+    needs: [prepare, lottery, prepare_retry, retry_lottery, report]
+    if: always() && inputs.lottery_mode == '3d' && needs.prepare.result == 'success' && (inputs.token_check_only || needs.report.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - name: 下载汇总结果
+        if: ${{ !inputs.token_check_only }}
         uses: actions/download-artifact@v4
         with:
           name: brand-campaign-summary-${{ inputs.group_name }}
           path: merged
 
       - name: 校验重试后的账号结果
+        if: ${{ !inputs.token_check_only }}
         shell: python
         run: |
           import json
@@ -424,3 +406,26 @@ jobs:
           if not rows or failed:
               print(f"::error::3D 抽奖未全部成功：失败 {failed}/{len(rows)}，请检查账号结果和汇总报告")
               raise SystemExit(1)
+
+      - name: 下载只读测试结果
+        if: inputs.token_check_only
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-${{ inputs.group_name }}-*
+          path: probe-results
+
+      - name: 校验重试后的只读结果
+        if: inputs.token_check_only
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          rows = []
+          for path in Path("probe-results").rglob("*.json"):
+              rows.extend(json.loads(path.read_text(encoding="utf-8")).get("results", []))
+          latest = max(rows, key=lambda row: row.get("completed_at", ""), default={})
+          if latest.get("account_index") != 1 or not latest.get("success"):
+              print("::error::只读测试重试后仍未成功，请检查账号结果")
+              raise SystemExit(1)
+          print("只读测试最终结果通过（包含新 Runner 重试结果）")

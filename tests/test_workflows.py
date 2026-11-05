@@ -105,6 +105,15 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("生成 JSON 和 XLSX 汇总", report)
         self.assertNotIn("raise SystemExit(1)", report)
 
+    def test_read_only_validation_uses_final_retry_result(self):
+        text = workflow_text("lottery.yml")
+        self.assertNotIn("name: 校验只读测试结果", text)
+        self.assertNotIn("name: 校验只读重试结果", text)
+        verification = text.split("  verify_results:\n", 1)[1]
+        self.assertIn("retry_lottery, report]", verification)
+        self.assertIn("name: 校验重试后的只读结果", verification)
+        self.assertIn("latest = max(rows", verification)
+
 
 if __name__ == "__main__":
     unittest.main()
