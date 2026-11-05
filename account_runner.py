@@ -31,8 +31,8 @@ def stop_process_tree(process: subprocess.Popen) -> None:
 def save_failure(output: Path, index: int, *, timed_out: bool, seconds: float) -> None:
     now = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
     detail = (
-        f"账号执行超过 {seconds:g} 秒，已终止进程并转交新 Runner 重试"
-        if timed_out else "账号进程结束但未生成有效结果，转交新 Runner 重试"
+        f"账号执行超过 {seconds:g} 秒，已终止进程"
+        if timed_out else "账号进程结束但未生成有效结果"
     )
     if timed_out:
         detail += "；若抽奖请求已发出但响应未返回，服务端结果尚不确定"
@@ -41,6 +41,7 @@ def save_failure(output: Path, index: int, *, timed_out: bool, seconds: float) -
         "group_name": os.getenv("GROUP_NAME", ""),
         "status": "failed", "success": False, "detail": detail,
         "timed_out": timed_out, "retry_required": True,
+        "attempt_number": int(os.getenv("ATTEMPT_NUMBER", "1")),
         "prizes": [], "draw_count": 0, "completed_at": now,
         "initial_chances": None, "remaining_chances": None,
         "final_chance_check": None,
@@ -90,7 +91,7 @@ def run_account(index: int, output: Path, seconds: float, script: Path = ROOT / 
             print("抽奖结果已保存，仅清理进程超时，保留成功结果", flush=True)
             return 0
         row.update({"timed_out": True, "retry_required": True})
-        row["detail"] = f"账号执行超过 {seconds:g} 秒，已结束进程，保留已记录结果并转交新 Runner 重试"
+        row["detail"] = f"账号执行超过 {seconds:g} 秒，已结束进程，保留已记录结果"
         payload = {"results": [row]}
         temporary = output.with_suffix(output.suffix + ".tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

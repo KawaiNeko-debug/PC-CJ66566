@@ -6,11 +6,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 
 SLIDER_FAILURE = "滑块验证未通过"
+
+
+def attempt_number(record: dict[str, Any], path: Path) -> int:
+    match = re.search(r"-retry(\d+)(?:[/\\]|$)", str(path.parent))
+    return max(int(record.get("attempt_number") or 1), int(match[1]) + 1 if match else 1)
 
 
 def is_slider_failure(record: dict[str, Any]) -> bool:
@@ -30,8 +36,7 @@ def is_mobile_retryable(record: dict[str, Any]) -> bool:
 
 
 def retry_indices(root: Path, expected: list[int] | None = None) -> list[int]:
-    indices: set[int] = set()
-    seen: set[int] = set()
+    attempts: dict[int, list[dict[str, Any]]] = {}
     slider_only = os.getenv("RETRY_SLIDER_ONLY", "").strip().lower() == "true"
     mobile = os.getenv("RETRY_MODE", "").strip().lower() == "3d"
     for path in sorted(root.rglob("*.json")):
@@ -47,13 +52,21 @@ def retry_indices(root: Path, expected: list[int] | None = None) -> list[int]:
                 continue
             index = int(row.get("account_index") or 0)
             if index > 0:
-                seen.add(index)
-                retryable = is_mobile_retryable(row) if mobile else (
-                    is_slider_failure(row) if slider_only else is_retryable_failure(row)
-                )
-                if retryable:
-                    indices.add(index)
-    indices.update(set(expected or []) - seen)
+                row = dict(row, attempt_number=attempt_number(row, path))
+                attempts.setdefault(index, []).append(row)
+    indices: set[int] = set()
+    for index, history in attempts.items():
+        if expected is not None and index not in expected:
+            continue
+        latest = max(history, key=lambda row: (row["attempt_number"], str(row.get("completed_at") or "")))
+        if mobile and any(not is_mobile_retryable(row) for row in history):
+            continue
+        retryable = is_mobile_retryable(latest) if mobile else (
+            is_slider_failure(latest) if slider_only else is_retryable_failure(latest)
+        )
+        if retryable:
+            indices.add(index)
+    indices.update(set(expected or []) - set(attempts))
     return sorted(indices)
 
 
@@ -67,8 +80,8 @@ def main() -> int:
     parser.add_argument("--github-output", default=os.getenv("GITHUB_OUTPUT", ""))
     args = parser.parse_args()
 
-    expected_matrix = json.loads(os.getenv("EXPECTED_MATRIX", '{"include":[]}'))
-    expected = [int(item["index"]) for item in expected_matrix["include"]]
+    expected_text = os.getenv("EXPECTED_MATRIX", "").strip()
+    expected = [int(item["index"]) for item in json.loads(expected_text)["include"]] if expected_text else None
     matrix = build_retry_matrix(args.root, expected)
     has_retry = bool(matrix["include"])
     output_lines = [

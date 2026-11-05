@@ -17,6 +17,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from retry_plan import attempt_number
+
 
 BASE_HEADERS = [
     "序号",
@@ -65,13 +67,22 @@ def load_result_files(root: Path) -> list[dict[str, Any]]:
             index = int(row.get("account_index") or 0)
             if index <= 0:
                 continue
-            attempts.setdefault(index, []).append(row)
+            attempts.setdefault(index, []).append(dict(row, attempt_number=attempt_number(row, path)))
     return [merge_account_attempts(attempts[index]) for index in sorted(attempts)]
 
 
 def merge_account_attempts(attempts: list[dict[str, Any]]) -> dict[str, Any]:
-    ordered = sorted(attempts, key=lambda row: str(row.get("completed_at") or ""))
+    ordered = sorted(attempts, key=lambda row: (int(row.get("attempt_number") or 1), str(row.get("completed_at") or "")))
     latest = dict(ordered[-1])
+    latest["retry_count"] = max(len(ordered) - 1, int(latest.get("attempt_number") or 1) - 1)
+    if latest.get("retry_count") and not latest.get("success"):
+        reason = str(latest.get("detail") or "执行未完成")
+        reason = reason.replace("并转交新 Runner 重试", "").replace("，转交新 Runner 重试", "")
+        limit = int(os.getenv("RETRY_LIMIT", "3"))
+        exhausted = latest["retry_count"] >= limit
+        latest["retry_exhausted"] = exhausted
+        suffix = f"（已达 {limit} 次重试上限）" if exhausted else "（本次重试已结束）"
+        latest["detail"] = f"已重试 {latest['retry_count']} 次仍未完成{suffix}；{reason}"
     earliest = ordered[0]
     latest["initial_points"] = int(earliest.get("initial_points") or 0)
     latest["initial_chances"] = (

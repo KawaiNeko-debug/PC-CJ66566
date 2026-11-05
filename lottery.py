@@ -1597,6 +1597,7 @@ def write_result(path: Path, result: dict[str, Any]) -> None:
         or ("" if is_3d_mode() else DEFAULT_ACTIVITY_ACCESS_ID),
         "results": [result],
     }
+    result["attempt_number"] = env_int("ATTEMPT_NUMBER", 1)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)

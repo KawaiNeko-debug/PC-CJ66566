@@ -11,16 +11,20 @@ def workflow_text(name: str) -> str:
     return (WORKFLOWS / name).read_text(encoding="utf-8")
 
 
+def account_workflows() -> str:
+    return workflow_text("lottery.yml") + workflow_text("lottery-retry.yml")
+
+
 class WorkflowTests(unittest.TestCase):
     def test_browser_jobs_use_supported_ubuntu_version(self):
-        text = workflow_text("lottery.yml")
-        for name in ("lottery", "retry_lottery"):
+        for file, name in (("lottery.yml", "lottery"), ("lottery-retry.yml", "accounts")):
+            text = workflow_text(file)
             block = re.search(rf"(?ms)^  {name}:.*?(?=^  [a-z_]+:|\Z)", text)
             self.assertIsNotNone(block)
             self.assertIn("runs-on: ubuntu-24.04", block.group(0))
 
     def test_split_credentials_are_masked_before_export(self):
-        text = workflow_text("lottery.yml")
+        text = account_workflows()
         self.assertEqual(text.count('print(f"::add-mask::{username.strip()}")'), 2)
         self.assertEqual(text.count('print(f"::add-mask::{password.strip()}")'), 2)
         for block in text.split('with open(os.environ["GITHUB_ENV"]')[:-1]:
@@ -31,7 +35,7 @@ class WorkflowTests(unittest.TestCase):
         worker = workflow_text("lottery.yml")
         self.assertIn("token_check_only: ${{ inputs.token_check_only }}", entry)
         self.assertIn("default: false", entry)
-        self.assertEqual(worker.count("TOKEN_CHECK_ONLY: ${{ inputs.token_check_only }}"), 3)
+        self.assertEqual(account_workflows().count("TOKEN_CHECK_ONLY: ${{ inputs.token_check_only }}"), 3)
         self.assertIn('account_count = 1 if os.environ.get("TOKEN_CHECK_ONLY") == "true"', worker)
         self.assertIn("needs.prepare.result == 'success' && !inputs.token_check_only", worker)
 
@@ -45,7 +49,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertNotRegex(text, r"(?m)^  (schedule|push|pull_request):", name)
 
     def test_reusable_workers_are_not_direct_entrypoints(self):
-        for name in ("lottery.yml", "mall-lottery.yml"):
+        for name in ("lottery.yml", "lottery-retry.yml", "mall-lottery.yml"):
             text = workflow_text(name)
             self.assertIn("  workflow_call:", text, name)
             self.assertNotIn("  workflow_dispatch:", text, name)
@@ -82,21 +86,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("ACCOUNTS_BATCH", text)
 
     def test_both_initial_and_new_runner_attempts_receive_activity_configuration(self):
-        text = workflow_text("lottery.yml")
+        text = account_workflows()
         self.assertEqual(text.count("LOTTERY_MODE: ${{ inputs.lottery_mode }}"), 2)
         self.assertEqual(text.count("LOTTERY_ACTIVITY_CODE: ${{ inputs.lottery_activity_code }}"), 2)
         self.assertEqual(text.count("ACTIVITY_ACCESS_ID: ${{ inputs.lottery_activity_access_id }}"), 2)
         self.assertIn("default: campaign", text)
-        self.assertEqual(text.count('default: ""'), 2)
+        self.assertEqual(text.count('default: ""'), 4)
         self.assertIn("RETRY_MODE: ${{ inputs.lottery_mode }}", text)
-        self.assertIn("EXPECTED_MATRIX: ${{ needs.prepare.outputs.matrix }}", text)
+        self.assertIn("EXPECTED_MATRIX: ${{ inputs.expected_matrix }}", text)
         for index in range(1, 6):
             group = workflow_text(f"lottery-group{index}.yml")
             self.assertNotIn("lottery_mode:", group)
             self.assertNotIn("lottery_activity_code:", group)
 
     def test_account_deadline_does_not_cancel_result_upload_or_retry(self):
-        text = workflow_text("lottery.yml")
+        text = account_workflows()
         self.assertEqual(text.count('python account_runner.py --index "$ACCOUNT_INDEX" --output result.json --timeout-seconds 300'), 2)
         self.assertEqual(text.count("timeout-minutes: 6"), 2)
         self.assertEqual(text.count("timeout-minutes: 10"), 2)
@@ -110,9 +114,27 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("name: 校验只读测试结果", text)
         self.assertNotIn("name: 校验只读重试结果", text)
         verification = text.split("  verify_results:\n", 1)[1]
-        self.assertIn("retry_lottery, report]", verification)
+        self.assertIn("retry_lottery_3, report]", verification)
         self.assertIn("name: 校验重试后的只读结果", verification)
         self.assertIn("latest = max(rows", verification)
+
+    def test_three_retry_rounds_chain_before_final_report(self):
+        text = workflow_text("lottery.yml")
+        for number, previous in ((1, "lottery"), (2, "retry_lottery"), (3, "retry_lottery_2")):
+            name = "retry_lottery" if number == 1 else f"retry_lottery_{number}"
+            block = re.search(rf"(?ms)^  {name}:.*?(?=^  [a-z_0-9]+:|\Z)", text).group(0)
+            self.assertIn(f"needs: [prepare, {previous}]", block)
+            self.assertIn(f"retry_round: {number}", block)
+            self.assertIn("uses: ./.github/workflows/lottery-retry.yml", block)
+            self.assertIn("always()", block)
+            if number > 1:
+                self.assertIn("inputs.lottery_mode == '3d'", block)
+        report = text.split("  report:\n", 1)[1].split("  verify_results:\n", 1)[0]
+        self.assertIn("retry_lottery_3]", report)
+        retry = workflow_text("lottery-retry.yml")
+        self.assertIn("-retry${{ inputs.retry_round }}", retry)
+        self.assertIn("previous-results", retry)
+        self.assertIn("DEPENDENCIES_OUTCOME", retry)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,27 @@ from retry_plan import build_retry_matrix, is_retryable_failure, is_slider_failu
 
 
 class RetryPlanTests(unittest.TestCase):
+    def test_later_rounds_only_select_accounts_still_unsuccessful(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"RETRY_MODE": "3d"}):
+            root = Path(directory)
+            def write(folder, rows):
+                path = root / folder / "result.json"
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps({"results": rows}), encoding="utf-8")
+
+            write("result-3d-1", [{"account_index": 1, "success": False}])
+            write("result-3d-1-retry1", [{"account_index": 1, "success": True, "draw_count": 1}])
+            write("result-3d-2", [{"account_index": 2, "success": False}])
+            write("result-3d-2-retry1", [{"account_index": 2, "success": False}])
+            write("result-3d-2-retry2", [{"account_index": 2, "success": True, "draw_count": 1}])
+            write("result-3d-3", [{"account_index": 3, "success": False}])
+            write("result-3d-3-retry1", [{"account_index": 3, "success": False}])
+            # Missing retry2 artifact must keep account 3 eligible for retry3.
+            (root / "broken.json").write_text("{", encoding="utf-8")
+            self.assertEqual(build_retry_matrix(root, [1, 2, 3]), {"include": [{"index": 3}]})
+            write("result-3d-3-retry3", [{"account_index": 3, "success": True}])
+            self.assertEqual(build_retry_matrix(root, [1, 2, 3]), {"include": []})
+
     def test_mobile_timeouts_and_missing_results_get_fresh_runners(self):
         rows = [
             {"account_index": 1, "success": False, "detail": "移动端登录超时（300s）"},

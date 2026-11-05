@@ -21,6 +21,24 @@ from report import (
 
 
 class ReportTests(unittest.TestCase):
+    def test_final_report_marks_retry_exhaustion_and_preserves_last_reason(self):
+        from report import load_result_files
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for round_number in range(4):
+                folder = "result-3d-32" + (f"-retry{round_number}" if round_number else "")
+                path = root / folder / "result.json"
+                path.parent.mkdir()
+                row = {"account_index": 32, "success": False, "status": "failed",
+                       "detail": "账号执行超过 300 秒，已终止进程并转交新 Runner 重试"}
+                path.write_text(json.dumps({"results": [row]}), encoding="utf-8")
+            record = load_result_files(root)[0]
+            self.assertEqual(record["retry_count"], 3)
+            self.assertTrue(record["retry_exhausted"])
+            self.assertIn("已重试 3 次仍未完成", record["detail"])
+            self.assertNotIn("转交", record["detail"])
+            self.assertIn("已达 3 次重试上限", build_telegram_summary([record]))
+
     def test_single_mobile_draw_keeps_unknown_counts_in_report(self):
         from lottery import PrizeRecord, execute_mobile_draw, result_template
         client = Mock()
