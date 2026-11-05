@@ -12,6 +12,13 @@ def workflow_text(name: str) -> str:
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_browser_jobs_use_supported_ubuntu_version(self):
+        text = workflow_text("lottery.yml")
+        for name in ("lottery", "retry_lottery"):
+            block = re.search(rf"(?ms)^  {name}:.*?(?=^  [a-z_]+:|\Z)", text)
+            self.assertIsNotNone(block)
+            self.assertIn("runs-on: ubuntu-24.04", block.group(0))
+
     def test_split_credentials_are_masked_before_export(self):
         text = workflow_text("lottery.yml")
         self.assertEqual(text.count('print(f"::add-mask::{username.strip()}")'), 2)
