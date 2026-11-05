@@ -12,6 +12,22 @@ def workflow_text(name: str) -> str:
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_split_credentials_are_masked_before_export(self):
+        text = workflow_text("lottery.yml")
+        self.assertEqual(text.count('print(f"::add-mask::{username.strip()}")'), 2)
+        self.assertEqual(text.count('print(f"::add-mask::{password.strip()}")'), 2)
+        for block in text.split('with open(os.environ["GITHUB_ENV"]')[:-1]:
+            self.assertIn('print(f"::add-mask::{password.strip()}")', block)
+
+    def test_mobile_token_probe_is_opt_in_and_skips_lottery_report(self):
+        entry = workflow_text("lottery-3d.yml")
+        worker = workflow_text("lottery.yml")
+        self.assertIn("token_check_only: ${{ inputs.token_check_only }}", entry)
+        self.assertIn("default: false", entry)
+        self.assertEqual(worker.count("TOKEN_CHECK_ONLY: ${{ inputs.token_check_only }}"), 3)
+        self.assertIn('account_count = 1 if os.environ.get("TOKEN_CHECK_ONLY") == "true"', worker)
+        self.assertIn("needs.prepare.result == 'success' && !inputs.token_check_only", worker)
+
     def test_all_user_entrypoints_are_manual(self):
         names = ["lottery-all.yml", "lottery-test.yml", "lottery-3d.yml", "mall-lottery-all.yml", "mall-lottery-test.yml"]
         names.extend(f"lottery-group{index}.yml" for index in range(1, 6))

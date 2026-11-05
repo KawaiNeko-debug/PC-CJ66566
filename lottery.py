@@ -14,7 +14,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 import requests
@@ -914,6 +914,76 @@ def establish_pc_sso(cookies: dict[str, str], account: str) -> SSOData:
     return SSOData(customer_code, prod_sid, group_session_id, secret_key)
 
 
+def establish_mobile_access_token(cookies: dict[str, str], account: str) -> str:
+    """Exchange the SSO ticket for the mobile API token used by the mini-program API."""
+    tgc = cookies.get("tgc", "").strip()
+    prod_sid = cookies.get(PROD_CAS_COOKIE, "").strip()
+    if not tgc or not prod_sid:
+        raise LotteryError("Passport Cookie 不完整，无法申请移动端 token")
+
+    mobile_origin = f"https://m.{ROOT_DOMAIN}"
+    mobile_app_id = os.getenv("LOTTERY_3D_MOBILE_APP_ID", "").strip() or f"{BRAND_UPPER}_MOBILE_APP"
+    timeout = max(
+        15,
+        env_int("HTTP_TIMEOUT_SECONDS", 90 if env_bool("GITHUB_ACTIONS", False) else 45),
+    )
+    session = requests.Session()
+    check_headers = _browser_headers(mobile_origin, f"{mobile_origin}/")
+    check_response = session.post(
+        CHECK_LOGIN_URL,
+        json={"appId": mobile_app_id},
+        headers=check_headers,
+        cookies={"tgc": tgc, PROD_CAS_COOKIE: prod_sid},
+        timeout=timeout,
+    )
+    check_response.raise_for_status()
+    check_payload = check_response.json()
+    check_data = check_payload.get("data") if isinstance(check_payload, dict) else None
+    customer_code = str(check_data.get("customerCode") or "").strip().upper() if isinstance(check_data, dict) else ""
+    auth_code = str(check_data.get("code") or "").strip() if isinstance(check_data, dict) else ""
+    if (
+        not api_succeeded(check_payload)
+        or not isinstance(check_data, dict)
+        or not check_data.get("isLogin")
+        or not auth_code
+        or not customer_code
+    ):
+        raise LotteryError("移动端 check-login 未返回有效登录 code")
+    if customer_code != account.strip().upper():
+        raise LotteryError("移动端登录客编不一致")
+
+    login_headers = _browser_headers(mobile_origin, f"{mobile_origin}/")
+    login_headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 15; Pixel 9) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/149.0.0.0 Mobile Safari/537.36"
+            ),
+            brand_header_name("clienttype"): "WEB",
+            access_token_header_name(): "NONE",
+        }
+    )
+    response = session.post(
+        f"{mobile_origin}/api/login/login-by-code",
+        files={"code": (None, auth_code)},
+        headers=login_headers,
+        cookies={"tgc": tgc, PROD_CAS_COOKIE: prod_sid},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data") if isinstance(payload, dict) else None
+    token = str(data.get("accessToken") or "").strip() if isinstance(data, dict) else ""
+    returned_code = str(data.get("customerCode") or "").strip().upper() if isinstance(data, dict) else ""
+    if not api_succeeded(payload) or not token:
+        raise LotteryError("移动端 login-by-code 未返回 access token")
+    if returned_code and returned_code != customer_code:
+        raise LotteryError("移动端 token 客编校验不一致")
+    log("移动端 API token 获取成功")
+    return token
+
+
 def inject_pc_sso(context: BrowserContext, sso: SSOData) -> None:
     context.add_cookies(
         [
@@ -933,6 +1003,7 @@ class CampaignClient:
         secret_holder: dict[str, str],
         access_token_holder: dict[str, str] | None = None,
         browser_cookies: list[dict[str, Any]] | None = None,
+        access_token_refresh: Callable[[], str] | None = None,
     ) -> None:
         self.page = page
         self.sso = sso
@@ -949,6 +1020,7 @@ class CampaignClient:
         if self.is_3d and not os.getenv("LOTTERY_ACTIVITY_CODE", "").strip():
             self.activity_code = "LAJ3T"
         self.access_token_holder = access_token_holder if access_token_holder is not None else {}
+        self.access_token_refresh = access_token_refresh
         self.api_session = requests.Session()
         for cookie in browser_cookies or []:
             if cookie.get("name") and cookie.get("value"):
@@ -972,9 +1044,32 @@ class CampaignClient:
         )
 
     def refresh_access_token(self, force_reload: bool = False) -> str:
-        header_name = access_token_header_name()
         attempts = max(1, env_int("ACCESS_TOKEN_RETRIES", 5))
         delay_seconds = max(1, env_int("ACCESS_TOKEN_RETRY_DELAY_SECONDS", 5))
+        if self.access_token_refresh is not None:
+            if not force_reload and self.access_token_holder.get("value"):
+                return self.access_token_holder["value"]
+            self.access_token_holder["value"] = ""
+            failure = "接口未返回 token"
+            for attempt in range(attempts):
+                try:
+                    token = self.access_token_refresh()
+                    if token:
+                        self.access_token_holder["value"] = token
+                        return token
+                except LotteryError as exc:
+                    failure = str(exc)
+                except requests.RequestException as exc:
+                    status = getattr(exc.response, "status_code", None)
+                    failure = f"移动端登录请求失败（HTTP {status}）" if status else f"移动端登录请求失败（{type(exc).__name__}）"
+                except ValueError:
+                    failure = "移动端登录响应不是有效 JSON"
+                if attempt + 1 < attempts:
+                    log(f"移动端 token 申请未完成，等待后重试 {attempt + 1}/{attempts - 1}")
+                    time.sleep(delay_seconds)
+            raise LotteryError(f"移动端 token 签发失败：{failure}（已尝试 {attempts} 次）")
+
+        header_name = access_token_header_name()
         rejected_token = self.access_token_holder.get("value", "") if force_reload else ""
         if force_reload:
             self.access_token_holder["value"] = ""
@@ -1022,7 +1117,7 @@ class CampaignClient:
                 "https://servicewechat.com/wx14221813f53bee5d/29/page-frame.html",
             ),
             "user-agent": DESKTOP_USER_AGENT,
-            "secretkey": self.secret_holder.get("value") or self.sso.secret_key,
+            "secretkey": os.getenv("LOTTERY_3D_SECRET_KEY", "").strip() or "defaultKeyId".encode().hex(),
             access_token_header_name(): token,
             brand_header_name("clienttype"): "MP-WEIXIN",
             brand_header_name("mp-version"): os.getenv("LOTTERY_3D_MP_VERSION", "1.2.5"),
@@ -1050,7 +1145,6 @@ class CampaignClient:
                     if not token:
                         break
                     headers[access_token_header_name()] = token
-                    headers["secretkey"] = self.secret_holder.get("value") or self.sso.secret_key
                     continue
                 raise LotteryError("活动接口鉴权失败，刷新会话后仍未通过")
             if not response.ok:
@@ -1085,6 +1179,8 @@ class CampaignClient:
         return payload
 
     def request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if env_bool("TOKEN_CHECK_ONLY") and path not in {USER_INFO_PATH, LUCKY_COUNT_PATH}:
+            raise LotteryError("只读验证禁止调用抽奖、兑换或盲盒接口")
         if self.is_3d:
             return self._request_3d(method, path, payload)
         return self._request_page(method, path, payload)
@@ -1227,6 +1323,8 @@ def result_template(account: str, account_index: int) -> dict[str, Any]:
 def execute_account(account: str, password: str, account_index: int) -> dict[str, Any]:
     require_brand_token()
     result = result_template(account, account_index)
+    if env_bool("TOKEN_CHECK_ONLY") and not is_3d_mode():
+        raise LotteryError("移动 token 只读验证仅支持 3D 模式")
     headless = env_bool("HEADLESS", True)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -1243,6 +1341,15 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
         context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
+        if env_bool("TOKEN_CHECK_ONLY"):
+            def block_mutations(route) -> None:
+                path = urlsplit(route.request.url).path
+                if path in {TURN_PATH, EXCHANGE_CHANCE_PATH, BLIND_BOX_PATH}:
+                    route.abort()
+                else:
+                    route.continue_()
+
+            context.route("**/*", block_mutations)
         page = context.new_page()
         timeouts = runtime_timeouts()
         page.set_default_timeout(timeouts["component"])
@@ -1252,6 +1359,11 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
             sso = establish_pc_sso(cookies, account)
             inject_pc_sso(context, sso)
             secret_holder = {"value": sso.secret_key}
+            mobile_mode = is_3d_mode()
+
+            def mobile_token_refresh() -> str:
+                return establish_mobile_access_token(cookies, account)
+
             access_token_holder = {"value": ""}
 
             def capture_runtime_secret(request) -> None:
@@ -1262,7 +1374,7 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
                         if current:
                             secret_holder["value"] = current
                     hostname = urlsplit(request.url).hostname or ""
-                    if ROOT_DOMAIN and (
+                    if not mobile_mode and ROOT_DOMAIN and (
                         hostname == ROOT_DOMAIN or hostname.endswith(f".{ROOT_DOMAIN}")
                     ):
                         current_token = extract_access_token(
@@ -1294,6 +1406,7 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
                 secret_holder,
                 access_token_holder,
                 context.cookies(),
+                mobile_token_refresh if mobile_mode else None,
             )
             user_info = client.open_and_verify()
             user_body = user_info.get("body") if isinstance(user_info, dict) else {}
@@ -1303,6 +1416,20 @@ def execute_account(account: str, password: str, account_index: int) -> dict[str
             result["activity_code"] = client.activity_code
             result["activity_access_id"] = client.activity_access_id
             result["initial_points"] = safe_int(user_body.get("canUseVoucher"), 0)
+
+            if client.is_3d and env_bool("TOKEN_CHECK_ONLY"):
+                count = client.lucky_count()
+                result.update({
+                    "success": True,
+                    "status": "completed",
+                    "detail": "移动 token 和 3D 次数查询验证通过（只读，不抽奖）",
+                    "initial_chances": count,
+                    "remaining_chances": count,
+                    "final_chance_check": count,
+                    "exchange_max": 0,
+                })
+                log("移动 token 和 3D 次数查询验证通过；只读测试结束，未提交抽奖")
+                return result
 
             if not client.is_3d:
                 try:

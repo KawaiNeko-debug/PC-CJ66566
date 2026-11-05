@@ -14,6 +14,7 @@ from lottery import (
     LotteryError,
     PrizeRecord,
     SSOData,
+    establish_mobile_access_token,
     execute_account,
     extract_access_token,
     run_3d_draw_cycle,
@@ -21,6 +22,49 @@ from lottery import (
 
 
 class TokenTests(unittest.TestCase):
+    @patch("lottery.requests.Session")
+    def test_mobile_token_is_exchanged_from_sso_cookie(self, session_factory):
+        with patch.dict(os.environ, {"BRAND_TOKEN": "abc"}, clear=True), \
+             patch("lottery.BRAND_UPPER", "ABC"), patch("lottery.BRAND_LOWER", "abc"), \
+             patch("lottery.ROOT_DOMAIN", "abc.com"), patch("lottery.CHECK_LOGIN_URL", "https://passport.abc.com/api/cas/sso/check-login"), \
+             patch("lottery.PROD_CAS_COOKIE", "PROD-ABC-CAS-SID"):
+            check = MagicMock(status_code=200, ok=True)
+            check.raise_for_status.return_value = None
+            check.json.return_value = {"success": True, "code": 200, "data": {
+                "isLogin": True, "code": "mobile-code", "customerCode": "A001",
+            }}
+            login = MagicMock(status_code=200, ok=True)
+            login.raise_for_status.return_value = None
+            login.json.return_value = {"success": True, "code": 200, "data": {
+                "accessToken": "mobile-token", "customerCode": "A001",
+            }}
+            session = session_factory.return_value
+            session.post.side_effect = [check, login]
+            self.assertEqual(
+                establish_mobile_access_token({"tgc": "ticket", "PROD-ABC-CAS-SID": "sid"}, "A001"),
+                "mobile-token",
+            )
+            first, second = session.post.call_args_list
+            self.assertEqual(first.kwargs["json"], {"appId": "ABC_MOBILE_APP"})
+            self.assertEqual(second.args[0], "https://m.abc.com/api/login/login-by-code")
+            self.assertEqual(second.kwargs["files"], {"code": (None, "mobile-code")})
+            self.assertEqual(second.kwargs["headers"]["x-abc-clienttype"], "WEB")
+            self.assertEqual(second.kwargs["headers"]["x-abc-accesstoken"], "NONE")
+
+            check.json.return_value["data"]["customerCode"] = "OTHER"
+            session.post.reset_mock(side_effect=True)
+            session.post.return_value = check
+            with self.assertRaisesRegex(LotteryError, "客编不一致"):
+                establish_mobile_access_token({"tgc": "ticket", "PROD-ABC-CAS-SID": "sid"}, "A001")
+            session.post.assert_called_once()
+
+            check.json.return_value["data"]["customerCode"] = "A001"
+            for data in ({}, {"accessToken": "mobile-token", "customerCode": "OTHER"}):
+                login.json.return_value["data"] = data
+                session.post.side_effect = [check, login]
+                with self.assertRaises(LotteryError):
+                    establish_mobile_access_token({"tgc": "ticket", "PROD-ABC-CAS-SID": "sid"}, "A001")
+
     def test_headers_are_case_insensitive(self):
         self.assertEqual(
             extract_access_token({"X-Abc-Accesstoken": " runtime-token "}, {}, "x-abc-accesstoken"),
@@ -73,7 +117,7 @@ class MobileClientTests(unittest.TestCase):
         self.assertEqual(call.kwargs["json"], {"activityCode": "LAJ3T"})
         self.assertEqual(call.kwargs["headers"]["x-abc-clienttype"], "MP-WEIXIN")
         self.assertEqual(call.kwargs["headers"]["x-abc-accesstoken"], "runtime-token")
-        self.assertEqual(call.kwargs["headers"]["secretkey"], "dynamic-key")
+        self.assertEqual(call.kwargs["headers"]["secretkey"], "defaultKeyId".encode().hex())
         self.assertFalse(call.kwargs["allow_redirects"])
         self.client.api_session.request.return_value = self.response(payload={
             "success": True, "data": {"prizeList": [{"prizeTitle": "5金豆"}]},
@@ -133,6 +177,41 @@ class MobileClientTests(unittest.TestCase):
         self.assertEqual(seen_tokens, ["runtime-token", "refreshed-token"])
         self.page.reload.assert_called_once()
 
+    def test_mobile_issuer_supplies_initial_token_without_pc_storage(self):
+        self.holder["value"] = ""
+        issuer = MagicMock(return_value="issued-mobile-token")
+        self.client.access_token_refresh = issuer
+        self.client.api_session.request.return_value = self.response()
+        self.assertEqual(self.client.lucky_count(), 1)
+        issuer.assert_called_once_with()
+        self.assertEqual(self.client.api_session.request.call_args.kwargs["headers"]["x-abc-accesstoken"], "issued-mobile-token")
+        self.page.evaluate.assert_not_called()
+        self.page.reload.assert_not_called()
+
+    def test_mobile_auth_refresh_reissues_token_and_caches_it(self):
+        issuer = MagicMock(return_value="reissued-mobile-token")
+        self.client.access_token_refresh = issuer
+        self.client.api_session.request.side_effect = [self.response(401), self.response()]
+        self.assertEqual(self.client.lucky_count(), 1)
+        issuer.assert_called_once_with()
+        self.assertEqual(self.holder["value"], "reissued-mobile-token")
+        self.page.evaluate.assert_not_called()
+        self.page.reload.assert_not_called()
+
+    @patch("lottery.time.sleep")
+    def test_mobile_token_issuance_has_bounded_retries(self, sleep):
+        self.holder["value"] = ""
+        self.client.access_token_refresh = MagicMock(side_effect=[
+            requests.Timeout(), LotteryError("temporary"), "recovered-mobile-token",
+        ])
+        self.assertEqual(self.client.refresh_access_token(), "recovered-mobile-token")
+        self.assertEqual(sleep.call_count, 2)
+        self.client.access_token_refresh = MagicMock(side_effect=LotteryError("temporary"))
+        with self.assertRaisesRegex(LotteryError, "移动端 token 签发失败"):
+            self.client.refresh_access_token(force_reload=True)
+        self.assertEqual(self.client.access_token_refresh.call_count, 3)
+        self.assertEqual(self.holder["value"], "")
+
     def test_business_auth_failure_is_retried_but_other_failure_is_not(self):
         self.page.evaluate.return_value = {"accessToken": "refreshed-token"}
         self.client.api_session.request.side_effect = [
@@ -168,6 +247,13 @@ class MobileClientTests(unittest.TestCase):
         self.client.api_session.request.assert_called_once()
         self.page.reload.assert_not_called()
 
+    def test_read_only_mode_blocks_mutations_before_network(self):
+        with patch.dict(os.environ, {"TOKEN_CHECK_ONLY": "true"}):
+            for path in (TURN_PATH, BLIND_BOX_PATH, "/api/integral/member/day/activity/exchangeLotteryChance"):
+                with self.assertRaisesRegex(LotteryError, "只读验证禁止"):
+                    self.client.request("POST", path, {})
+        self.client.api_session.request.assert_not_called()
+
     def test_default_campaign_uses_existing_request_and_body(self):
         with patch.dict(os.environ, {"LOTTERY_MODE": "campaign"}):
             client = CampaignClient(self.page, self.client.sso, {"value": "key"})
@@ -183,6 +269,30 @@ class MobileClientTests(unittest.TestCase):
 
 
 class MobileAccountTests(unittest.TestCase):
+    def test_read_only_probe_checks_count_without_drawing(self):
+        with patch.dict(os.environ, {"LOTTERY_MODE": "3d", "TOKEN_CHECK_ONLY": "true"}), \
+             patch("lottery.require_brand_token"), patch("lottery.sync_playwright"), \
+             patch("lottery.login_passport"), patch("lottery.inject_pc_sso"), \
+             patch("lottery.establish_pc_sso", return_value=SSOData("A001", "sid", "session", "key")), \
+             patch("lottery.CampaignClient") as factory:
+            client = factory.return_value
+            client.is_3d = True
+            client.activity_name = "3D抽奖"
+            client.activity_code = "LAJ3T"
+            client.activity_access_id = ""
+            client.open_and_verify.return_value = {"body": {"customerCode": "A001"}}
+            client.lucky_count.return_value = 3
+            result = execute_account("A001", "dummy-password", 1)
+            self.assertTrue(result["success"])
+            self.assertEqual(result["initial_chances"], 3)
+            self.assertEqual(result["draw_count"], 0)
+            client.lucky_count.assert_called_once_with()
+            client.draw_once.assert_not_called()
+            client.exchange_detail.assert_not_called()
+            client.exchange_once.assert_not_called()
+            client.request.assert_not_called()
+            self.assertIsNotNone(factory.call_args.args[5])
+
     def test_zero_chances_skip_draw_and_never_exchange(self):
         client = MagicMock()
         cycle = run_3d_draw_cycle(client, 0)
@@ -205,6 +315,7 @@ class MobileAccountTests(unittest.TestCase):
                  patch("lottery.require_brand_token"), patch("lottery.sync_playwright"), \
                  patch("lottery.login_passport"), patch("lottery.inject_pc_sso"), \
                  patch("lottery.establish_pc_sso", return_value=SSOData("A001", "sid", "session", "key")), \
+                 patch("lottery.establish_mobile_access_token", return_value="mobile-token"), \
                  patch("lottery.CampaignClient") as factory:
                 client = factory.return_value
                 client.is_3d = True

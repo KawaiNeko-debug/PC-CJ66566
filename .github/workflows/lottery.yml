@@ -12,6 +12,11 @@ on:
         required: false
         default: campaign
         type: string
+      token_check_only:
+        description: 只读验证首个账号的移动 token 和次数
+        required: false
+        default: false
+        type: boolean
       lottery_activity_code:
         description: 活动代码
         required: false
@@ -42,6 +47,7 @@ jobs:
       matrix: ${{ steps.accounts.outputs.matrix }}
     env:
       ACCOUNTS: ${{ secrets.ACCOUNTS }}
+      TOKEN_CHECK_ONLY: ${{ inputs.token_check_only }}
     steps:
       - id: accounts
         shell: python
@@ -63,7 +69,8 @@ jobs:
               print(f"::error title=ACCOUNTS 格式错误::第 {invalid} 行必须使用 客编,密码 格式")
               raise SystemExit(1)
 
-          matrix = {"include": [{"index": index} for index in range(1, len(lines) + 1)]}
+          account_count = 1 if os.environ.get("TOKEN_CHECK_ONLY") == "true" else len(lines)
+          matrix = {"include": [{"index": index} for index in range(1, account_count + 1)]}
           with open(output, "a", encoding="utf-8") as stream:
               stream.write("matrix=" + json.dumps(matrix, separators=(",", ":")) + "\n")
           print(f"已准备 {len(lines)} 个账号")
@@ -84,6 +91,7 @@ jobs:
       HEADLESS: "true"
       RESULT_JSON_PATH: result.json
       LOTTERY_MODE: ${{ inputs.lottery_mode }}
+      TOKEN_CHECK_ONLY: ${{ inputs.token_check_only }}
       ACTIVITY_ACCESS_ID: ${{ inputs.lottery_activity_access_id }}
       LOTTERY_ACTIVITY_CODE: ${{ inputs.lottery_activity_code }}
       LOTTERY_EXCHANGE_SAFETY_CAP: "3"
@@ -136,6 +144,8 @@ jobs:
           username, separator, password = lines[index - 1].partition(",")
           if not separator or not username.strip() or not password.strip():
               raise SystemExit(f"账号第 {index} 行格式错误")
+          print(f"::add-mask::{username.strip()}")
+          print(f"::add-mask::{password.strip()}")
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:
               stream.write("ACCOUNT_USERNAME<<__BRAND_USERNAME__\n")
               stream.write(username.strip() + "\n")
@@ -184,6 +194,16 @@ jobs:
           path: result.json
           retention-days: 14
 
+      - name: 校验只读测试结果
+        if: inputs.token_check_only
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("result.json").read_text(encoding="utf-8"))
+          raise SystemExit(0 if all(row.get("success") for row in payload["results"]) else 1)
+
   prepare_retry:
     needs: [prepare, lottery]
     if: always() && needs.prepare.result == 'success'
@@ -223,6 +243,7 @@ jobs:
       HEADLESS: "true"
       RESULT_JSON_PATH: result.json
       LOTTERY_MODE: ${{ inputs.lottery_mode }}
+      TOKEN_CHECK_ONLY: ${{ inputs.token_check_only }}
       ACTIVITY_ACCESS_ID: ${{ inputs.lottery_activity_access_id }}
       LOTTERY_ACTIVITY_CODE: ${{ inputs.lottery_activity_code }}
       LOTTERY_EXCHANGE_SAFETY_CAP: "3"
@@ -275,6 +296,8 @@ jobs:
           username, separator, password = lines[index - 1].partition(",")
           if not separator or not username.strip() or not password.strip():
               raise SystemExit(f"账号第 {index} 行格式错误")
+          print(f"::add-mask::{username.strip()}")
+          print(f"::add-mask::{password.strip()}")
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:
               stream.write("ACCOUNT_USERNAME<<__BRAND_USERNAME__\n")
               stream.write(username.strip() + "\n")
@@ -322,9 +345,19 @@ jobs:
           path: result.json
           retention-days: 14
 
+      - name: 校验只读重试结果
+        if: inputs.token_check_only
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("result.json").read_text(encoding="utf-8"))
+          raise SystemExit(0 if all(row.get("success") for row in payload["results"]) else 1)
+
   report:
     needs: [prepare, lottery, prepare_retry, retry_lottery]
-    if: always() && needs.prepare.result == 'success'
+    if: always() && needs.prepare.result == 'success' && !inputs.token_check_only
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -360,3 +393,17 @@ jobs:
             merged/result.json
             merged/lottery-summary-*.xlsx
           retention-days: 30
+
+      - name: 校验 3D 账号执行结果
+        if: inputs.lottery_mode == '3d'
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("merged/result.json").read_text(encoding="utf-8"))
+          rows = payload.get("results", [])
+          failed = sum(not row.get("success") for row in rows)
+          if not rows or failed:
+              print(f"::error::3D 抽奖未全部成功：失败 {failed}/{len(rows)}，请检查账号结果和汇总报告")
+              raise SystemExit(1)

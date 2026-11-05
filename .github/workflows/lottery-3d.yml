@@ -2,6 +2,11 @@ name: 3D抽奖
 
 on:
   workflow_dispatch:
+    inputs:
+      token_check_only:
+        description: 仅验证首个账号的移动 token 和次数（不抽奖、不兑换）
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -14,6 +19,7 @@ jobs:
       lottery_mode: 3d
       lottery_activity_code: LAJ3T
       lottery_activity_access_id: ""
+      token_check_only: ${{ inputs.token_check_only }}
     secrets:
       ACCOUNTS: ${{ secrets.ACCOUNTS_3D }}
       BRAND_TOKEN: ${{ secrets.BRAND_TOKEN }}
