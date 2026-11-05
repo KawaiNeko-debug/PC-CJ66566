@@ -135,6 +135,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("-retry${{ inputs.retry_round }}", retry)
         self.assertIn("previous-results", retry)
         self.assertIn("DEPENDENCIES_OUTCOME", retry)
+        self.assertIn("value: ${{ jobs.plan.outputs.has_retry }}", retry)
+        self.assertIn("timeout-minutes: 3", retry)
+        self.assertNotIn("continue-on-error: true", retry.split("  accounts:\n", 1)[0])
+        self.assertIn("needs.retry_lottery.outputs.has_retry != 'false'", text)
+        self.assertIn("needs.retry_lottery_2.outputs.has_retry != 'false'", text)
 
 
 if __name__ == "__main__":

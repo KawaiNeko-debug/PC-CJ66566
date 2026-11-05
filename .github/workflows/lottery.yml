@@ -224,7 +224,7 @@ jobs:
   retry_lottery_2:
     name: 第 2 轮新 Runner 重试
     needs: [prepare, retry_lottery]
-    if: always() && needs.prepare.result == 'success' && inputs.lottery_mode == '3d'
+    if: always() && needs.prepare.result == 'success' && inputs.lottery_mode == '3d' && needs.retry_lottery.result != 'skipped' && needs.retry_lottery.outputs.has_retry != 'false'
     uses: ./.github/workflows/lottery-retry.yml
     with:
       group_name: ${{ inputs.group_name }}
@@ -241,7 +241,7 @@ jobs:
   retry_lottery_3:
     name: 第 3 轮新 Runner 重试
     needs: [prepare, retry_lottery_2]
-    if: always() && needs.prepare.result == 'success' && inputs.lottery_mode == '3d'
+    if: always() && needs.prepare.result == 'success' && inputs.lottery_mode == '3d' && needs.retry_lottery_2.result != 'skipped' && needs.retry_lottery_2.outputs.has_retry != 'false'
     uses: ./.github/workflows/lottery-retry.yml
     with:
       group_name: ${{ inputs.group_name }}
